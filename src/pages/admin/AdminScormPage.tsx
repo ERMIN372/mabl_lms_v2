@@ -16,6 +16,7 @@ export default function AdminScormPage() {
   const { addCourse } = useCourses()
   const [packages, setPackages] = useState<ScormPackage[]>([])
   const [busy, setBusy] = useState(false)
+  const [creatingId, setCreatingId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -42,6 +43,9 @@ export default function AdminScormPage() {
   }
 
   const onCreateCourse = async (pkg: ScormPackage) => {
+    if (creatingId) return
+    setError('')
+    setCreatingId(pkg.id)
     const draft: Course = {
       id: '',
       title: pkg.title,
@@ -71,8 +75,14 @@ export default function AdminScormPage() {
         },
       ],
     }
-    const id = await addCourse(draft)
-    navigate(`/admin/courses/${id}`)
+    try {
+      const id = await addCourse(draft)
+      navigate(`/admin/courses/${id}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось создать курс из пакета')
+    } finally {
+      setCreatingId(null)
+    }
   }
 
   const onRemove = async (pkg: ScormPackage) => {
@@ -136,8 +146,13 @@ export default function AdminScormPage() {
                   >
                     Открыть <ArrowUpRight width={14} height={14} />
                   </a>
-                  <Button onClick={() => onCreateCourse(pkg)} variant="ghost" size="sm">
-                    Создать курс
+                  <Button
+                    onClick={() => onCreateCourse(pkg)}
+                    variant="ghost"
+                    size="sm"
+                    disabled={creatingId !== null}
+                  >
+                    {creatingId === pkg.id ? 'Создаём…' : 'Создать курс'}
                   </Button>
                   <button
                     onClick={() => onRemove(pkg)}
