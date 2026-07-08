@@ -4,7 +4,9 @@ import { getSql } from './_db.js'
 import { ensureSchema, initDatabase } from './_seed.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
-import { signToken, requireAdmin } from './_auth.js'
+import { signToken, requireAdmin, verifyToken } from './_auth.js'
+import { handleUpload } from '@vercel/blob/client'
+import { list as blobList, del as blobDel } from '@vercel/blob'
 import type {
   AdminUser,
   AppNotification,
@@ -84,6 +86,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     path === 'auth/migrate' ||
     path === 'payments/create' ||
     path === 'payments/webhook' ||
+    // Выдачу токена загрузки в Blob вызывает клиент SDK (@vercel/blob) без нашего
+    // заголовка авторизации — права администратора проверяются внутри обработчика
+    // по токену из clientPayload.
+    path === 'scorm/blob-upload' ||
     (segments[0] === 'news' && (segments[2] === 'comments' || segments[2] === 'reactions'))
   const needsAdmin = segments[0] === 'admin' || (isMutation && !isPublicMutation)
   if (needsAdmin && !requireAdmin(req, res)) return
@@ -324,7 +330,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (method === 'DELETE') return await deleteDbUser(id, res)
     }
 
-    if (path === 'admin/scorm' && method === 'GET') return res.json([])
+    // ---------- SCORM-ПАКЕТЫ ----------
+    // Раздача файлов пакета через наш домен (прокси в Vercel Blob). Same-origin
+    // обязателен: контент SCORM ищет window.API по родительским фреймам.
+    if (segments[0] === 'scorm-file' && method === 'GET') {
+      return await serveScormFile(segments[1], segments.slice(2).join('/'), res)
+    }
+    if (path === 'scorm' && method === 'GET') {
+      return res.json(await contentList<ScormPackageMeta>('scorm', []))
+    }
+    if (path === 'scorm/blob-upload' && method === 'POST') {
+      return await scormBlobUpload(req, res)
+    }
+    if (path === 'scorm' && method === 'POST') {
+      return res.status(201).json(await saveScormPackage(parseBody(req)))
+    }
+    if (segments[0] === 'scorm' && segments.length === 2 && method === 'DELETE') {
+      await deleteScormPackage(segments[1])
+      return res.status(204).end()
+    }
 
     // ---------- ADMIN · УЧАСТНИКИ (БД) ----------
     if (path === 'admin/users' && method === 'GET') return res.json(await listParticipants())
@@ -1085,6 +1109,140 @@ function uniqueId(desired: string, taken: Set<string>): string {
     id = `${id}-${n}`
   }
   return id
+}
+
+// ---------------- SCORM-пакеты (метаданные в БД + файлы в Vercel Blob) --------
+
+interface ScormPackageMeta {
+  id: string
+  title: string
+  launch: string
+  launchUrl: string
+  fileCount: number
+  uploadedAt: string
+  /** Origin хранилища Blob, например https://xxxx.public.blob.vercel-storage.com */
+  blobBase?: string
+}
+
+const SCORM_MIME: Record<string, string> = {
+  html: 'text/html;charset=utf-8',
+  htm: 'text/html;charset=utf-8',
+  js: 'text/javascript',
+  mjs: 'text/javascript',
+  css: 'text/css',
+  json: 'application/json',
+  xml: 'application/xml',
+  txt: 'text/plain;charset=utf-8',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  svg: 'image/svg+xml',
+  ico: 'image/x-icon',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  woff: 'font/woff',
+  woff2: 'font/woff2',
+  ttf: 'font/ttf',
+  otf: 'font/otf',
+}
+
+function scormMime(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  return SCORM_MIME[ext] ?? 'application/octet-stream'
+}
+
+// Кэш origin хранилища по id пакета — чтобы не ходить в БД на каждый файл
+// (тёплый инстанс функции переиспользует значение между запросами).
+const scormBaseCache = new Map<string, string>()
+
+/** Сохранить метаданные пакета (id задаёт клиент — совпадает с путём в Blob). */
+async function saveScormPackage(body: Record<string, unknown>): Promise<ScormPackageMeta> {
+  const sql = getSql()
+  await ensureSchema(sql)
+  const meta = body as unknown as ScormPackageMeta
+  const id = String(meta.id ?? '').trim()
+  if (!id) throw new Error('Не задан id пакета')
+  await sql`
+    INSERT INTO content (collection, id, data, sort_order)
+    VALUES ('scorm', ${id}, ${JSON.stringify(meta)}::jsonb,
+      (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM content WHERE collection = 'scorm'))
+    ON CONFLICT (collection, id)
+      DO UPDATE SET data = ${JSON.stringify(meta)}::jsonb, updated_at = NOW()
+  `
+  if (meta.blobBase) scormBaseCache.set(id, meta.blobBase)
+  return meta
+}
+
+/** Удалить метаданные и все файлы пакета из Blob. */
+async function deleteScormPackage(id: string): Promise<void> {
+  const sql = getSql()
+  await ensureSchema(sql)
+  await sql`DELETE FROM content WHERE collection = 'scorm' AND id = ${id}`
+  scormBaseCache.delete(id)
+  try {
+    const { blobs } = await blobList({ prefix: `scorm/${id}/` })
+    if (blobs.length) await blobDel(blobs.map((b) => b.url))
+  } catch (err) {
+    console.error('[scorm] blob delete error:', err)
+  }
+}
+
+/** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
+async function serveScormFile(id: string, rel: string, res: VercelResponse) {
+  if (!id || !rel) return res.status(404).send('SCORM-ресурс не найден')
+  let base = scormBaseCache.get(id)
+  if (!base) {
+    const meta = await contentGet<ScormPackageMeta>('scorm', id)
+    base = meta?.blobBase
+    if (base) scormBaseCache.set(id, base)
+  }
+  if (!base) return res.status(404).send('SCORM-пакет не найден')
+
+  const encoded = rel.split('/').map(encodeURIComponent).join('/')
+  const upstream = await fetch(`${base}/scorm/${id}/${encoded}`)
+  if (!upstream.ok) return res.status(404).send('SCORM-ресурс не найден')
+
+  const buf = Buffer.from(await upstream.arrayBuffer())
+  res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
+  res.setHeader('Cache-Control', 'public, max-age=3600')
+  return res.status(200).send(buf)
+}
+
+/**
+ * Выдать клиенту токен прямой загрузки в Blob. Вызывается SDK @vercel/blob;
+ * права администратора проверяем по токену сессии из clientPayload.
+ */
+async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
+  try {
+    const jsonResponse = await handleUpload({
+      body: parseBody(req) as unknown as Parameters<typeof handleUpload>[0]['body'],
+      request: req as unknown as Request,
+      onBeforeGenerateToken: async (pathname, clientPayload) => {
+        let ok = false
+        try {
+          const parsed = clientPayload ? JSON.parse(clientPayload) : {}
+          const payload = verifyToken(parsed.token)
+          ok = payload?.kind === 'admin'
+        } catch {
+          ok = false
+        }
+        if (!ok) throw new Error('Требуются права администратора.')
+        if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
+        return {
+          addRandomSuffix: false,
+          allowOverwrite: true,
+        }
+      },
+    })
+    return res.json(jsonResponse)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Ошибка загрузки в Blob'
+    return res.status(400).json({ message })
+  }
 }
 
 // ---------------- универсальное хранилище контента ----------------
