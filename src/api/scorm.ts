@@ -17,6 +17,10 @@ export const scormApi = {
     return scormStore.list()
   },
 
+  async status(): Promise<{ configured: boolean }> {
+    return scormStore.status()
+  },
+
   async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
     return scormStore.upload(file, onProgress)
   },

@@ -19,6 +19,7 @@ export default function AdminScormPage() {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [creatingId, setCreatingId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [blobReady, setBlobReady] = useState<boolean | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const uploadLabel = busy
@@ -31,6 +32,7 @@ export default function AdminScormPage() {
 
   useEffect(() => {
     refresh()
+    api.scorm.status().then((s) => setBlobReady(s.configured))
   }, [])
 
   const onUpload = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -121,6 +123,19 @@ export default function AdminScormPage() {
           </>
         }
       />
+
+      {blobReady === false && (
+        <div className="mt-6 rounded-token border border-amber-400/50 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="font-semibold">Хранилище файлов не подключено</p>
+          <p className="mt-1">
+            Загрузка SCORM недоступна: в проекте Vercel не подключён Blob Storage. Откройте проект на
+            Vercel → <span className="font-medium">Storage → Create → Blob</span>, затем сделайте{' '}
+            <span className="font-medium">Redeploy</span>. Переменная{' '}
+            <code className="rounded bg-amber-100 px-1">BLOB_READ_WRITE_TOKEN</code> проставится
+            автоматически.
+          </p>
+        </div>
+      )}
 
       {error && (
         <div className="mt-6 rounded-token border border-ocean/40 bg-oceanc-10 px-4 py-3 text-sm text-ocean">

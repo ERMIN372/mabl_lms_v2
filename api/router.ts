@@ -4,9 +4,9 @@ import { getSql } from './_db.js'
 import { ensureSchema, initDatabase } from './_seed.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
-import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
-import { handleUpload } from '@vercel/blob/client'
-import { list as blobList, del as blobDel } from '@vercel/blob'
+import { signToken, requireAdmin, verifyToken } from './_auth.js'
+import { handleUploadPresigned } from '@vercel/blob/client'
+import { list as blobList, del as blobDel, issueSignedToken, presignUrl } from '@vercel/blob'
 import type {
   AdminUser,
   AppNotification,
@@ -86,9 +86,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     path === 'auth/migrate' ||
     path === 'payments/create' ||
     path === 'payments/webhook' ||
-    // Выдачу токена загрузки в Blob вызывает клиент SDK (@vercel/blob) без нашего
-    // заголовка авторизации — права администратора проверяются внутри обработчика
-    // по токену из clientPayload.
+    // Presigned-загрузку вызывает клиент SDK (@vercel/blob) без нашего заголовка
+    // авторизации — права администратора проверяются внутри по токену из clientPayload.
     path === 'scorm/blob-upload' ||
     (segments[0] === 'news' && (segments[2] === 'comments' || segments[2] === 'reactions'))
   const needsAdmin = segments[0] === 'admin' || (isMutation && !isPublicMutation)
@@ -138,7 +137,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'events' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<CalendarEvent>('events', parseBody(req) as CalendarEvent, 'event'),
+        await contentCreate<CalendarEvent>('events', parseBody(req) as unknown as CalendarEvent, 'event'),
       )
     }
     if (path === 'events/next' && method === 'GET') {
@@ -202,7 +201,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'materials' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<Material>('materials', parseBody(req) as Material, 'material'),
+        await contentCreate<Material>('materials', parseBody(req) as unknown as Material, 'material'),
       )
     }
     if (path === 'materials/reset' && method === 'POST') {
@@ -221,7 +220,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'surveys' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<Survey>('surveys', parseBody(req) as Survey, 'survey'),
+        await contentCreate<Survey>('surveys', parseBody(req) as unknown as Survey, 'survey'),
       )
     }
     if (path === 'surveys/reset' && method === 'POST') {
@@ -241,7 +240,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (path === 'forum/sections' && method === 'POST') {
       const created = await contentCreate<ForumSection>(
         'forum_sections',
-        { ...(parseBody(req) as ForumSection), topicsCount: 0 },
+        { ...(parseBody(req) as unknown as ForumSection), topicsCount: 0 },
         'section',
       )
       return res.status(201).json(created)
@@ -250,7 +249,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.json(await contentList<ForumTopic>('forum_topics', seedForumTopics))
     }
     if (path === 'forum/topics' && method === 'POST') {
-      const body = parseBody(req) as ForumTopic
+      const body = parseBody(req) as unknown as ForumTopic
       const created = await contentCreate<ForumTopic>(
         'forum_topics',
         { ...body, comments: body.comments ?? [] },
@@ -292,7 +291,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'notifications' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<AppNotification>('notifications', parseBody(req) as AppNotification, 'note', true),
+        await contentCreate<AppNotification>('notifications', parseBody(req) as unknown as AppNotification, 'note', true),
       )
     }
     if (path === 'notifications/reset' && method === 'POST') {
@@ -336,21 +335,57 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (segments[0] === 'scorm-file' && method === 'GET') {
       return await serveScormFile(segments[1], segments.slice(2).join('/'), res)
     }
+    if (path === 'scorm/blob-status' && method === 'GET') {
+      // Возвращаем только ИМЕНА blob-переменных (без значений) — для диагностики.
+      const blobEnvNames = Object.keys(process.env).filter((k) => k.includes('BLOB'))
+      // Серверный put() авторизуется по RW-токену или по OIDC (BLOB_STORE_ID +
+      // VERCEL_OIDC_TOKEN, который подставляет рантайм Vercel).
+      return res.json({
+        configured: Boolean(resolveBlobToken()) || Boolean(process.env.BLOB_STORE_ID),
+        tokens: blobEnvNames,
+      })
+    }
+    if (path === 'scorm/blob-check' && method === 'GET') {
+      // Диагностика: пробуем реально выпустить signed-token и возвращаем
+      // настоящий текст ошибки (клиентский SDK его прячет).
+      try {
+        const token = await issueSignedToken({
+          pathname: 'scorm/_diag/probe.txt',
+          operations: ['put'],
+          maximumSizeInBytes: 1024,
+        })
+        return res.json({ ok: true, hasToken: Boolean(token) })
+      } catch (err) {
+        return res.json({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
+    if (path === 'scorm/blob-probe' && method === 'GET') {
+      // Диагностика раздачи: для каждого пакета пробуем достать launch-файл.
+      const pkgs = await contentList<ScormPackageMeta>('scorm', [])
+      const results = []
+      for (const p of pkgs) {
+        const pathname = `scorm/${p.id}/${p.launch}`
+        let status = 0
+        let error: string | undefined
+        try {
+          status = (await fetch(await signedScormUrl(pathname))).status
+        } catch (e) {
+          status = -1
+          error = e instanceof Error ? e.message : String(e)
+        }
+        results.push({ id: p.id, launch: p.launch, hasFilesMap: Boolean(p.files), status, error })
+      }
+      return res.json(results)
+    }
+    if (path === 'scorm/blob-last-error' && method === 'GET') {
+      const row = await contentGet<{ id: string; message?: string; at?: string }>(
+        'scorm_debug',
+        'last-error',
+      )
+      return res.json(row ?? { message: null })
+    }
     if (path === 'scorm' && method === 'GET') {
       return res.json(await contentList<ScormPackageMeta>('scorm', []))
-    }
-    // Преflight перед загрузкой: сообщает клиенту конкретную причину отказа
-    // (истёкшая админ-сессия или неподключённое хранилище Blob), потому что SDK
-    // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
-    if (path === 'scorm/upload-preflight' && method === 'GET') {
-      const admin = verifyToken(bearer(req))?.kind === 'admin'
-      return res.json({
-        admin,
-        blob: Boolean(blobReadWriteToken()),
-        // Имена (без значений) blob-переменных окружения — чтобы отличить
-        // «хранилище не подключено» от «токен под нестандартным именем».
-        blobEnv: admin ? Object.keys(process.env).filter((k) => k.includes('BLOB')) : undefined,
-      })
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
       return await scormBlobUpload(req, res)
@@ -1126,6 +1161,17 @@ function uniqueId(desired: string, taken: Set<string>): string {
 
 // ---------------- SCORM-пакеты (метаданные в БД + файлы в Vercel Blob) --------
 
+/**
+ * Токен чтения-записи Blob. Vercel обычно кладёт его в BLOB_READ_WRITE_TOKEN,
+ * но при нестандартном префиксе хранилища имя может быть вида
+ * <PREFIX>_BLOB_READ_WRITE_TOKEN — берём любой подходящий.
+ */
+function resolveBlobToken(): string | undefined {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
+  const key = Object.keys(process.env).find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN'))
+  return key ? process.env[key] : undefined
+}
+
 interface ScormPackageMeta {
   id: string
   title: string
@@ -1135,6 +1181,8 @@ interface ScormPackageMeta {
   uploadedAt: string
   /** Origin хранилища Blob, например https://xxxx.public.blob.vercel-storage.com */
   blobBase?: string
+  /** Карта путь-в-пакете → фактический URL файла в Blob. */
+  files?: Record<string, string>
 }
 
 const SCORM_MIME: Record<string, string> = {
@@ -1168,9 +1216,9 @@ function scormMime(path: string): string {
   return SCORM_MIME[ext] ?? 'application/octet-stream'
 }
 
-// Кэш origin хранилища по id пакета — чтобы не ходить в БД на каждый файл
+// Кэш метаданных по id пакета — чтобы не ходить в БД на каждый файл
 // (тёплый инстанс функции переиспользует значение между запросами).
-const scormBaseCache = new Map<string, string>()
+const scormMetaCache = new Map<string, ScormPackageMeta>()
 
 /** Сохранить метаданные пакета (id задаёт клиент — совпадает с путём в Blob). */
 async function saveScormPackage(body: Record<string, unknown>): Promise<ScormPackageMeta> {
@@ -1186,7 +1234,7 @@ async function saveScormPackage(body: Record<string, unknown>): Promise<ScormPac
     ON CONFLICT (collection, id)
       DO UPDATE SET data = ${JSON.stringify(meta)}::jsonb, updated_at = NOW()
   `
-  if (meta.blobBase) scormBaseCache.set(id, meta.blobBase)
+  scormMetaCache.set(id, meta)
   return meta
 }
 
@@ -1195,78 +1243,141 @@ async function deleteScormPackage(id: string): Promise<void> {
   const sql = getSql()
   await ensureSchema(sql)
   await sql`DELETE FROM content WHERE collection = 'scorm' AND id = ${id}`
-  scormBaseCache.delete(id)
+  scormMetaCache.delete(id)
   try {
-    const { blobs } = await blobList({ prefix: `scorm/${id}/` })
-    if (blobs.length) await blobDel(blobs.map((b) => b.url))
+    const token = resolveBlobToken()
+    const { blobs } = await blobList({ prefix: `scorm/${id}/`, token })
+    if (blobs.length) await blobDel(blobs.map((b) => b.url), { token })
   } catch (err) {
     console.error('[scorm] blob delete error:', err)
+  }
+}
+
+// Широкий signed-token на чтение (без ограничения по пути) — кэшируется, чтобы
+// не выпускать его на каждый файл. presignUrl из него строит подписанные ссылки
+// локально (без сети).
+let scormReadToken: Awaited<ReturnType<typeof issueSignedToken>> | null = null
+let scormReadTokenExp = 0
+
+async function broadScormReadToken() {
+  const now = Date.now()
+  if (scormReadToken && now < scormReadTokenExp) return scormReadToken
+  scormReadToken = await issueSignedToken({ operations: ['get'], validUntil: now + 15 * 60 * 1000 })
+  scormReadTokenExp = now + 10 * 60 * 1000
+  return scormReadToken
+}
+
+/** Подписанная ссылка на приватный файл пакета. Пробуем широкий токен, при
+ * неудаче — точечный на этот путь. */
+async function signedScormUrl(pathname: string): Promise<string> {
+  try {
+    const token = await broadScormReadToken()
+    const { presignedUrl } = await presignUrl(token, { pathname, operation: 'get', access: 'private' })
+    return presignedUrl
+  } catch {
+    scormReadToken = null
+    const token = await issueSignedToken({
+      pathname,
+      operations: ['get'],
+      validUntil: Date.now() + 5 * 60 * 1000,
+    })
+    const { presignedUrl } = await presignUrl(token, { pathname, operation: 'get', access: 'private' })
+    return presignedUrl
   }
 }
 
 /** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
 async function serveScormFile(id: string, rel: string, res: VercelResponse) {
   if (!id || !rel) return res.status(404).send('SCORM-ресурс не найден')
-  let base = scormBaseCache.get(id)
-  if (!base) {
-    const meta = await contentGet<ScormPackageMeta>('scorm', id)
-    base = meta?.blobBase
-    if (base) scormBaseCache.set(id, base)
+  let meta = scormMetaCache.get(id)
+  if (!meta) {
+    const loaded = await contentGet<ScormPackageMeta>('scorm', id)
+    if (loaded) {
+      meta = loaded
+      scormMetaCache.set(id, loaded)
+    }
   }
-  if (!base) return res.status(404).send('SCORM-пакет не найден')
+  if (!meta) return res.status(404).send('SCORM-пакет не найден')
+  // Если известна карта файлов и такого нет — сразу 404.
+  if (meta.files && !(rel in meta.files)) return res.status(404).send('SCORM-ресурс не найден')
 
-  const encoded = rel.split('/').map(encodeURIComponent).join('/')
-  const upstream = await fetch(`${base}/scorm/${id}/${encoded}`)
-  if (!upstream.ok) return res.status(404).send('SCORM-ресурс не найден')
-
-  const buf = Buffer.from(await upstream.arrayBuffer())
-  res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
-  res.setHeader('Cache-Control', 'public, max-age=3600')
-  return res.status(200).send(buf)
+  const pathname = `scorm/${id}/${rel}`
+  try {
+    const upstream = await fetch(await signedScormUrl(pathname))
+    if (!upstream.ok) {
+      await saveScormDebug(`serve ${pathname}: upstream ${upstream.status}`)
+      return res.status(404).send('SCORM-ресурс не найден')
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer())
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
+    res.setHeader('Cache-Control', 'public, max-age=3600')
+    return res.status(200).send(buf)
+  } catch (err) {
+    await saveScormDebug(`serve ${pathname}: ${err instanceof Error ? err.message : String(err)}`)
+    return res.status(404).send('SCORM-ресурс не найден')
+  }
 }
 
 /**
- * RW-токен Vercel Blob. Обычно интеграция кладёт его в BLOB_READ_WRITE_TOKEN,
- * но при кастомном имени/префиксе переменная может называться иначе
- * (…_BLOB_READ_WRITE_TOKEN) — поэтому ищем и такой вариант.
- */
-function blobReadWriteToken(): string | undefined {
-  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
-  const key = Object.keys(process.env).find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN'))
-  return key ? process.env[key] : undefined
-}
-
-/**
- * Выдать клиенту токен прямой загрузки в Blob. Вызывается SDK @vercel/blob;
- * права администратора проверяем по токену сессии из clientPayload.
+ * Выдать клиенту presigned-URL для прямой загрузки файла в Blob (без лимита
+ * тела запроса — крупные файлы грузятся частями через multipart). Авторизация
+ * по OIDC (issueSignedToken через VERCEL_OIDC_TOKEN); права администратора — по
+ * токену сессии из clientPayload. Файлы приватные; читает их serveScormFile по
+ * подписанному URL.
  */
 async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
+  const webhookPublicKey = process.env.BLOB_WEBHOOK_PUBLIC_KEY
+  if (!webhookPublicKey && !process.env.BLOB_STORE_ID && !resolveBlobToken()) {
+    return res.status(503).json({
+      message:
+        'Хранилище Vercel Blob не подключено. Подключите Blob в проекте Vercel и выполните Redeploy.',
+    })
+  }
   try {
-    const jsonResponse = await handleUpload({
-      token: blobReadWriteToken(),
-      body: parseBody(req) as unknown as Parameters<typeof handleUpload>[0]['body'],
+    const jsonResponse = await handleUploadPresigned({
+      body: parseBody(req) as unknown as Parameters<typeof handleUploadPresigned>[0]['body'],
       request: req as unknown as Request,
-      onBeforeGenerateToken: async (pathname, clientPayload) => {
+      webhookPublicKey: webhookPublicKey ?? '',
+      getSignedToken: async (pathname, clientPayload) => {
         let ok = false
         try {
           const parsed = clientPayload ? JSON.parse(clientPayload) : {}
-          const payload = verifyToken(parsed.token)
-          ok = payload?.kind === 'admin'
+          ok = verifyToken(parsed.token)?.kind === 'admin'
         } catch {
           ok = false
         }
         if (!ok) throw new Error('Требуются права администратора.')
         if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
-        return {
-          addRandomSuffix: false,
-          allowOverwrite: true,
-        }
+        const token = await issueSignedToken({
+          pathname,
+          operations: ['put'],
+          maximumSizeInBytes: 1024 * 1024 * 1024,
+        })
+        return { token, urlOptions: { addRandomSuffix: false } }
       },
     })
     return res.json(jsonResponse)
   } catch (err) {
+    const full = err instanceof Error ? err.stack || err.message : String(err)
+    await saveScormDebug(full)
     const message = err instanceof Error ? err.message : 'Ошибка загрузки в Blob'
     return res.status(400).json({ message })
+  }
+}
+
+/** Сохранить последнюю ошибку загрузки для диагностики. */
+async function saveScormDebug(message: string): Promise<void> {
+  try {
+    const sql = getSql()
+    await ensureSchema(sql)
+    const data = JSON.stringify({ message, at: new Date().toISOString() })
+    await sql`
+      INSERT INTO content (collection, id, data, sort_order)
+      VALUES ('scorm_debug', 'last-error', ${data}::jsonb, 0)
+      ON CONFLICT (collection, id) DO UPDATE SET data = ${data}::jsonb, updated_at = NOW()
+    `
+  } catch (err) {
+    console.error('[scorm] saveScormDebug error:', err)
   }
 }
 
