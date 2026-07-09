@@ -134,17 +134,55 @@ async function runPool<T>(
 
 export type UploadProgress = (done: number, total: number) => void
 
+export interface ScormBlobStatus {
+  configured: boolean
+  /** Имена найденных BLOB-переменных окружения (без значений). */
+  tokens?: string[]
+}
+
+export interface ScormProbe {
+  id: string
+  launch: string
+  /** HTTP-статус launch-файла: 200 — здоров, иначе проблема (-1 — сетевой сбой). */
+  status: number
+  error?: string
+  hasFilesMap?: boolean
+}
+
+export interface ScormLastError {
+  message: string | null
+  at?: string
+}
+
 export const scormStore = {
   async list(): Promise<ScormPackage[]> {
     return http<ScormPackage[]>('/scorm')
   },
 
   /** Подключено ли хранилище Vercel Blob (иначе загрузка невозможна). */
-  async status(): Promise<{ configured: boolean }> {
+  async status(): Promise<ScormBlobStatus> {
     try {
-      return await http<{ configured: boolean }>('/scorm/blob-status')
+      return await http<ScormBlobStatus>('/scorm/blob-status')
     } catch {
       return { configured: false }
+    }
+  },
+
+  /** Проверка доступности launch-файла каждого пакета (для диагностики). */
+  async probe(): Promise<ScormProbe[]> {
+    try {
+      return await http<ScormProbe[]>('/scorm/blob-probe')
+    } catch {
+      return []
+    }
+  },
+
+  /** Последняя серверная ошибка загрузки/раздачи (для диагностики). */
+  async lastError(): Promise<ScormLastError> {
+    try {
+      return await http<ScormLastError>('/scorm/blob-last-error')
+    } catch {
+      return { message: null }
     }
   },
 

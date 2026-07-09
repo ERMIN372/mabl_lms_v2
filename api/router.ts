@@ -90,7 +90,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // авторизации — права администратора проверяются внутри по токену из clientPayload.
     path === 'scorm/blob-upload' ||
     (segments[0] === 'news' && (segments[2] === 'comments' || segments[2] === 'reactions'))
-  const needsAdmin = segments[0] === 'admin' || (isMutation && !isPublicMutation)
+  // Диагностика SCORM отдаёт стеки ошибок и структуру пакетов — только админам.
+  const isScormDiag =
+    segments[0] === 'scorm' &&
+    ['blob-status', 'blob-check', 'blob-probe', 'blob-last-error'].includes(segments[1])
+  const needsAdmin = segments[0] === 'admin' || isScormDiag || (isMutation && !isPublicMutation)
   if (needsAdmin && !requireAdmin(req, res)) return
 
   try {
