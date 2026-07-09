@@ -169,14 +169,18 @@ export const scormStore = {
     // Преflight: заранее выясняем причину возможного отказа, потому что SDK
     // @vercel/blob при любой ошибке выдачи токена показывает лишь общую фразу
     // «Failed to retrieve the client token».
-    const pre = await http<{ admin: boolean; blob: boolean }>('/scorm/upload-preflight')
+    const pre = await http<{ admin: boolean; blob: boolean; blobEnv?: string[] }>(
+      '/scorm/upload-preflight',
+    )
     if (!pre.admin) {
       throw new Error('Сессия администратора истекла. Выйдите и войдите снова, затем повторите загрузку.')
     }
     if (!pre.blob) {
+      const found = pre.blobEnv?.length
+        ? ` Найдены переменные: ${pre.blobEnv.join(', ')} — похоже, токен под другим именем.`
+        : ' В окружении деплоя нет ни одной BLOB-переменной — сделайте свежий Redeploy Production после подключения хранилища.'
       throw new Error(
-        'На сервере не подключено файловое хранилище Vercel Blob (нет BLOB_READ_WRITE_TOKEN). ' +
-          'Подключите его в проекте Vercel (Storage → Blob) и перезадеплойте.',
+        'На сервере недоступен токен записи Vercel Blob (BLOB_READ_WRITE_TOKEN).' + found,
       )
     }
 

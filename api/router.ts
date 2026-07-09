@@ -343,9 +343,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // (истёкшая админ-сессия или неподключённое хранилище Blob), потому что SDK
     // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
     if (path === 'scorm/upload-preflight' && method === 'GET') {
+      const admin = verifyToken(bearer(req))?.kind === 'admin'
       return res.json({
-        admin: verifyToken(bearer(req))?.kind === 'admin',
-        blob: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
+        admin,
+        blob: Boolean(blobReadWriteToken()),
+        // Имена (без значений) blob-переменных окружения — чтобы отличить
+        // «хранилище не подключено» от «токен под нестандартным именем».
+        blobEnv: admin ? Object.keys(process.env).filter((k) => k.includes('BLOB')) : undefined,
       })
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
@@ -1222,12 +1226,24 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
 }
 
 /**
+ * RW-токен Vercel Blob. Обычно интеграция кладёт его в BLOB_READ_WRITE_TOKEN,
+ * но при кастомном имени/префиксе переменная может называться иначе
+ * (…_BLOB_READ_WRITE_TOKEN) — поэтому ищем и такой вариант.
+ */
+function blobReadWriteToken(): string | undefined {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
+  const key = Object.keys(process.env).find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN'))
+  return key ? process.env[key] : undefined
+}
+
+/**
  * Выдать клиенту токен прямой загрузки в Blob. Вызывается SDK @vercel/blob;
  * права администратора проверяем по токену сессии из clientPayload.
  */
 async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
   try {
     const jsonResponse = await handleUpload({
+      token: blobReadWriteToken(),
       body: parseBody(req) as unknown as Parameters<typeof handleUpload>[0]['body'],
       request: req as unknown as Request,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
