@@ -4,7 +4,7 @@ import { getSql } from './_db.js'
 import { ensureSchema, initDatabase } from './_seed.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
-import { signToken, requireAdmin, verifyToken } from './_auth.js'
+import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
 import { handleUpload } from '@vercel/blob/client'
 import { list as blobList, del as blobDel } from '@vercel/blob'
 import type {
@@ -338,6 +338,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'scorm' && method === 'GET') {
       return res.json(await contentList<ScormPackageMeta>('scorm', []))
+    }
+    // Преflight перед загрузкой: сообщает клиенту конкретную причину отказа
+    // (истёкшая админ-сессия или неподключённое хранилище Blob), потому что SDK
+    // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
+    if (path === 'scorm/upload-preflight' && method === 'GET') {
+      return res.json({
+        admin: verifyToken(bearer(req))?.kind === 'admin',
+        blob: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
+      })
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
       return await scormBlobUpload(req, res)
