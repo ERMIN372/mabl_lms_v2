@@ -18,6 +18,13 @@ import { http, getToken } from '@/api/config'
 
 const BASE = '/scorm-store'
 
+/**
+ * Порог, выше которого файл грузится в Blob частями (multipart). Так снимается
+ * зависимость от лимита на размер одиночного запроса — крупные ассеты в пакете
+ * (видео, PNG на несколько МБ) больше не приводят к ошибке 413.
+ */
+const MULTIPART_THRESHOLD = 4 * 1024 * 1024
+
 export interface ScormPackage {
   id: string
   title: string
@@ -175,6 +182,10 @@ export const scormStore = {
           handleUploadUrl: '/api/scorm/blob-upload',
           contentType: mimeFor(rel),
           clientPayload,
+          // Крупные файлы (видео, тяжёлые изображения) грузим частями. Multipart
+          // надёжно обходит любой лимит на размер одиночного запроса и устойчивее
+          // к обрывам сети; мелкие файлы (их большинство) — одним запросом.
+          multipart: blob.size > MULTIPART_THRESHOLD,
         })
         if (!blobBase) blobBase = new URL(result.url).origin
       },
