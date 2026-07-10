@@ -191,8 +191,16 @@ export const scormStore = {
    * метаданные пакета в БД. Возвращает метаданные пакета.
    */
   async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
-    // JSZip подгружается отдельным чанком только при загрузке пакета.
-    const { default: JSZip } = await import('jszip')
+    // JSZip подгружается отдельным чанком только при загрузке пакета. Если сайт
+    // обновился, пока вкладка была открыта, старый чанк уже удалён с сервера —
+    // просим перезагрузить страницу вместо загадочной ошибки import.
+    const JSZip = await import('jszip')
+      .then((m) => m.default)
+      .catch(() => {
+        throw new Error(
+          'Вышло обновление сайта — перезагрузите страницу (Ctrl+F5 / Cmd+Shift+R) и повторите загрузку.',
+        )
+      })
     const zip = await JSZip.loadAsync(file)
 
     // Находим манифест (обычно в корне).
@@ -224,6 +232,16 @@ export const scormStore = {
       throw new Error('SCORM-пакет пуст: внутри архива нет файлов.')
     }
 
+    // Почтовые шлюзы и антивирусы «обезвреживают» архивы, переименовывая скрипты
+    // .js → .j_ (реже .js_). Манифест и index.html при этом ссылаются на .js, и
+    // пакет не запускается ни в одной LMS. Восстанавливаем исходные имена, если
+    // одноимённого .js в архиве нет.
+    const relNames = new Set(entries.map((f) => f.name.slice(manifestDir.length)))
+    const restoreSanitizedExt = (rel: string): string => {
+      const fixed = rel.replace(/\.js_$/i, '.js').replace(/\.j_$/i, '.js')
+      return fixed !== rel && !relNames.has(fixed) ? fixed : rel
+    }
+
     // Токен сессии администратора кладём в clientPayload — сервер проверяет
     // права в /api/scorm/blob-upload перед выдачей presigned-URL.
     const clientPayload = JSON.stringify({ token: getToken() })
@@ -236,7 +254,7 @@ export const scormStore = {
       entries,
       6,
       async (entry) => {
-        const rel = entry.name.slice(manifestDir.length)
+        const rel = restoreSanitizedExt(entry.name.slice(manifestDir.length))
         const blob = await entry.async('blob')
         const result = await uploadPresigned(`scorm/${id}/${rel}`, blob, {
           access: 'public',
