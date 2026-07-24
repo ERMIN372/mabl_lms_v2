@@ -36,4 +36,4 @@ export const api = {
 }
 
 export { API_URL, ApiError } from './config'
-export type { ScormPackage } from './scorm'
+export type { ScormPackage, ScormDiagnostics } from './scorm'

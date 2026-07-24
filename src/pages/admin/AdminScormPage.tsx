@@ -5,10 +5,56 @@ import { Button } from '@/components/ui/Button'
 import { ArrowUpRight, Clipboard } from '@/components/ui/Icon'
 import { AdminPageHeader } from '@/components/admin/AdminUI'
 import { api } from '@/api'
-import type { ScormPackage } from '@/api'
+import type { ScormPackage, ScormDiagnostics } from '@/api'
 import { useCourses } from '@/context/CoursesContext'
 import { formatDateTime } from '@/lib/utils'
 import type { Course } from '@/types'
+
+/** Наглядный вывод серверной диагностики пакета. */
+function DiagnosticsPanel({ report }: { report: ScormDiagnostics }) {
+  const allOk = !report.listError && report.failed.length === 0 && report.fileCount > 0
+  return (
+    <div className="mt-2 rounded-token border border-ink-10 bg-ink-5 px-4 py-3 text-sm">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-ink-70">
+        <span>
+          Авторизация хранилища: <b>{report.mode === 'none' ? 'нет' : report.mode.toUpperCase()}</b>
+        </span>
+        <span>
+          Файлов: <b>{report.fileCount}</b>, доступно: <b>{report.okCount}</b>, ошибок:{' '}
+          <b className={report.failed.length ? 'text-ocean' : ''}>{report.failed.length}</b>
+        </span>
+        <span className="text-ink-50">({report.tookMs} мс)</span>
+      </div>
+
+      {report.listError && (
+        <p className="mt-2 font-semibold text-ocean">
+          Не удалось получить список файлов из хранилища: {report.listError}
+        </p>
+      )}
+
+      {allOk && (
+        <p className="mt-2 font-semibold text-emerald-600">
+          Все файлы пакета отдаются сервером. Если курс не открывается — очистите кэш
+          (Ctrl+Shift+R) или отключите service worker.
+        </p>
+      )}
+
+      {report.failed.length > 0 && (
+        <div className="mt-2">
+          <p className="mb-1 font-semibold text-ocean">Не отдаются:</p>
+          <ul className="space-y-0.5 font-mono text-[0.72rem] text-ink-70">
+            {report.failed.slice(0, 20).map((f: ScormDiagnostics['failed'][number]) => (
+              <li key={f.path}>
+                {f.path} — {f.sizeKb} КБ — {f.via} — статус {String(f.status)}
+              </li>
+            ))}
+            {report.failed.length > 20 && <li>…ещё {report.failed.length - 20}</li>}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
 
 /** Загрузка и управление SCORM-пакетами. */
 export default function AdminScormPage() {
@@ -23,6 +69,8 @@ export default function AdminScormPage() {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [creatingId, setCreatingId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  // Результаты серверной диагностики пакета: id → отчёт (или 'loading').
+  const [diag, setDiag] = useState<Record<string, ScormDiagnostics | 'loading'>>({})
   const fileRef = useRef<HTMLInputElement>(null)
 
   const uploadLabel = busy
@@ -124,6 +172,21 @@ export default function AdminScormPage() {
     }
   }
 
+  const onDiagnose = async (pkg: ScormPackage) => {
+    setDiag((d) => ({ ...d, [pkg.id]: 'loading' }))
+    try {
+      const report = await api.scorm.diagnose(pkg.id)
+      setDiag((d) => ({ ...d, [pkg.id]: report }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось выполнить диагностику')
+      setDiag((d) => {
+        const next = { ...d }
+        delete next[pkg.id]
+        return next
+      })
+    }
+  }
+
   const onRemove = async (pkg: ScormPackage) => {
     if (window.confirm(`Удалить пакет «${pkg.title}»? Курсы со ссылкой на него перестанут работать.`)) {
       await api.scorm.remove(pkg.id)
@@ -199,6 +262,14 @@ export default function AdminScormPage() {
                   >
                     {creatingId === pkg.id ? 'Создаём…' : 'Создать курс'}
                   </Button>
+                  <Button
+                    onClick={() => onDiagnose(pkg)}
+                    variant="ghost"
+                    size="sm"
+                    disabled={diag[pkg.id] === 'loading'}
+                  >
+                    {diag[pkg.id] === 'loading' ? 'Проверяем…' : 'Диагностика'}
+                  </Button>
                   <button
                     onClick={() => onRemove(pkg)}
                     className="whitespace-nowrap rounded-token px-3 py-2 text-[0.7rem] font-semibold uppercase tracking-wide text-ocean hover:bg-oceanc-10"
@@ -206,6 +277,12 @@ export default function AdminScormPage() {
                     Удалить
                   </button>
                 </div>
+
+                {diag[pkg.id] && diag[pkg.id] !== 'loading' && (
+                  <div className="md:col-span-12">
+                    <DiagnosticsPanel report={diag[pkg.id] as ScormDiagnostics} />
+                  </div>
+                )}
               </li>
             ))}
           </ul>
