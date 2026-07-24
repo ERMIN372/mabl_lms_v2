@@ -31,8 +31,8 @@ function LessonPlayer({
           <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-wisdom/30">
             <Play width={26} height={26} />
           </span>
-          <p className="mt-4 text-sm uppercase tracking-wide text-wisdom/60">Видео-плеер · {lesson.duration}</p>
-          <p className="mt-1 text-xs text-wisdom/40">Подключение видеохостинга — в production</p>
+          <p className="mt-4 text-sm uppercase tracking-wide text-wisdom/60">Видео · {lesson.duration}</p>
+          <p className="mt-1 text-xs text-wisdom/40">Видеоматериал появится здесь после публикации</p>
         </div>
       </div>
     )
@@ -53,9 +53,9 @@ function LessonPlayer({
         <span className="flex h-16 w-16 items-center justify-center rounded-card border border-ink-20 text-ocean">
           <Clipboard width={26} height={26} />
         </span>
-        <p className="mt-4 text-sm uppercase tracking-wide text-ink-60">SCORM-модуль · {lesson.duration}</p>
+        <p className="mt-4 text-sm uppercase tracking-wide text-ink-60">Интерактивный тренинг · {lesson.duration}</p>
         <p className="mt-1 max-w-xs text-xs text-ink-40">
-          Здесь встраивается интерактивный SCORM-пакет (iframe / SCORM API) в production.
+          Материалы тренинга появятся здесь после публикации.
         </p>
       </div>
     )
@@ -67,8 +67,8 @@ function LessonPlayer({
       <h3 className="font-serif text-2xl text-neft">{lesson.title}</h3>
       <div className="mt-5 space-y-4 leading-relaxed text-ink-80">
         <p>
-          Это образовательный лонгрид. В production сюда подгружается полный текстовый материал
-          урока с иллюстрациями, цитатами и врезками в фирменной типографике МАБЛ.
+          Полный текстовый материал урока с иллюстрациями, цитатами и врезками появится здесь
+          после публикации.
         </p>
         <p>
           Лонгриды раскрывают теоретическую основу программы и дополняют видео-лекции и
@@ -137,11 +137,22 @@ export default function CourseDetailPage() {
               </div>
               <h1 className="mt-5 font-serif text-4xl leading-tight md:text-5xl">{displayTitle(course.title)}</h1>
               <p className="mt-4 max-w-2xl text-lg text-wisdom/70">{course.subtitle}</p>
+              {course.description && (
+                <p className="mt-4 max-w-3xl leading-relaxed text-wisdom/60">{course.description}</p>
+              )}
               <div className="mt-6 flex flex-wrap gap-x-8 gap-y-2 text-sm text-wisdom/60">
-                <span>Преподаватель: {course.instructor}</span>
+                {course.instructor && <span>Преподаватель: {course.instructor}</span>}
+                {course.curator && <span>Куратор кафедры: {course.curator}</span>}
                 <span>{formatDuration(course.durationHours)}</span>
                 <span>{course.lessonsCount} уроков</span>
               </div>
+              {course.tags.length > 0 && (
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {course.tags.map((t) => (
+                    <Badge key={t} tone="dark" className="ring-1 ring-wisdom/20">{t}</Badge>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="hidden justify-end lg:flex">
               <Crest className="h-28 w-28" onDark />
@@ -151,55 +162,45 @@ export default function CourseDetailPage() {
       </section>
 
       <Container className="py-14 md:py-20">
+        {/* Контент урока / превью — на всю ширину, чтобы SCORM-пакету хватало
+            места показать собственную панель с содержанием и прогрессом. */}
+        {activeLesson && (
+          <section className="mb-12">
+            <h2 className="mb-4 font-serif text-2xl text-neft">
+              {owned ? 'Обучение' : 'Предпросмотр материалов'}
+            </h2>
+            {owned ? (
+              <div className="space-y-4">
+                {lessonDone && (
+                  <div className="flex items-center gap-3 rounded-card border border-ocean/30 bg-oceanc-10 px-5 py-3.5">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ocean text-wisdom">
+                      <Check width={16} height={16} />
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold text-neft">Тренинг пройден</p>
+                      <p className="text-[0.78rem] text-ink-60">Урок «{activeLesson.title}» завершён.</p>
+                    </div>
+                  </div>
+                )}
+                <LessonPlayer lesson={activeLesson} onScormStatus={handleScormStatus} />
+              </div>
+            ) : (
+              <div className="flex aspect-video flex-col items-center justify-center rounded-card border border-dashed border-ink-20 bg-ink-5 text-center">
+                <Lock width={30} height={30} className="text-ink-40" />
+                <p className="mt-4 max-w-xs text-sm text-ink-60">
+                  Материалы курса откроются после оформления доступа.
+                </p>
+                <Button to={`/checkout?course=${course.id}`} size="sm" className="mt-5">
+                  Купить за {formatPrice(course.price)}
+                </Button>
+              </div>
+            )}
+          </section>
+        )}
+
         <div className="grid gap-12 lg:grid-cols-[1.5fr_0.9fr]">
           {/* Основная колонка */}
           <div className="space-y-12">
-            {/* О курсе */}
-            <section>
-              <h2 className="font-serif text-2xl text-neft">О программе</h2>
-              <p className="mt-4 leading-relaxed text-ink-80">{course.description}</p>
-              <div className="mt-5 flex flex-wrap gap-2">
-                {course.tags.map((t) => (
-                  <Badge key={t} tone="neutral">{t}</Badge>
-                ))}
-              </div>
-            </section>
-
-            {/* Контент урока / превью */}
-            <section>
-              <h2 className="mb-4 font-serif text-2xl text-neft">
-                {owned ? 'Обучение' : 'Предпросмотр материалов'}
-              </h2>
-              {activeLesson ? (
-                owned ? (
-                  <div className="space-y-4">
-                    {lessonDone && (
-                      <div className="flex items-center gap-3 rounded-card border border-ocean/30 bg-oceanc-10 px-5 py-3.5">
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ocean text-wisdom">
-                          <Check width={16} height={16} />
-                        </span>
-                        <div>
-                          <p className="text-sm font-semibold text-neft">Тренинг пройден</p>
-                          <p className="text-[0.78rem] text-ink-60">Урок «{activeLesson.title}» завершён.</p>
-                        </div>
-                      </div>
-                    )}
-                    <LessonPlayer lesson={activeLesson} onScormStatus={handleScormStatus} />
-                  </div>
-                ) : (
-                  <div className="flex aspect-video flex-col items-center justify-center rounded-card border border-dashed border-ink-20 bg-ink-5 text-center">
-                    <Lock width={30} height={30} className="text-ink-40" />
-                    <p className="mt-4 max-w-xs text-sm text-ink-60">
-                      Материалы курса откроются после оформления доступа.
-                    </p>
-                    <Button to={`/checkout?course=${course.id}`} size="sm" className="mt-5">
-                      Купить за {formatPrice(course.price)}
-                    </Button>
-                  </div>
-                )
-              ) : null}
-            </section>
-
             {/* Программа */}
             <section>
               <h2 className="mb-5 font-serif text-2xl text-neft">Программа курса</h2>
@@ -270,7 +271,7 @@ export default function CourseDetailPage() {
                     </Button>
                     <ul className="mt-6 space-y-2 text-sm text-ink-60">
                       <li className="flex gap-2"><Check width={16} height={16} className="text-ocean" /> {course.lessonsCount} уроков</li>
-                      <li className="flex gap-2"><Check width={16} height={16} className="text-ocean" /> Видео, лонгриды, SCORM</li>
+                      <li className="flex gap-2"><Check width={16} height={16} className="text-ocean" /> Видео, лонгриды, тренинги</li>
                       <li className="flex gap-2"><Check width={16} height={16} className="text-ocean" /> Сертификат МАБЛ</li>
                     </ul>
                   </>

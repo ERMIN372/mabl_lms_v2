@@ -58,16 +58,19 @@ export default function AdminScormPage() {
     const draft: Course = {
       id: '',
       title: pkg.title,
-      subtitle: 'Интерактивный SCORM-тренинг',
-      description: 'Загруженный SCORM-пакет. Отредактируйте описание программы при необходимости.',
+      subtitle: 'Интерактивный тренинг',
+      // Описание и куратор заполняются администратором на странице редактирования,
+      // куда происходит переход сразу после создания курса.
+      description: '',
       format: 'scorm',
       level: 'Базовый',
       instructor: 'МАБЛ',
+      curator: '',
       durationHours: 1,
       lessonsCount: 1,
       price: 0,
       progress: 0,
-      tags: ['SCORM', 'Тренинг'],
+      tags: ['Тренинг'],
       modules: [
         {
           id: 'm1',

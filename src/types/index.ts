@@ -89,6 +89,8 @@ export interface Course {
   format: CourseFormat
   level: CourseLevel
   instructor: string
+  /** Куратор кафедры, отвечающий за программу. */
+  curator?: string
   durationHours: number
   lessonsCount: number
   price: number

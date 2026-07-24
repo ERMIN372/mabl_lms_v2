@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowUpRight } from './ui/Icon'
+import { cn, displayTitle } from '@/lib/utils'
 
 /**
  * Плеер SCORM-пакетов (SCORM 1.2). Контент запускается в iframe, а на родительском
@@ -121,6 +122,8 @@ export function ScormPlayer({
   onStatus,
 }: ScormPlayerProps) {
   const [ready, setReady] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
 
@@ -133,22 +136,48 @@ export function ScormPlayer({
     }
   }, [storageKey, studentName])
 
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement === wrapRef.current)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) void document.exitFullscreen()
+    else void wrapRef.current?.requestFullscreen()
+  }
+
   return (
-    <div className="overflow-hidden rounded-card border border-ink-10 bg-neft">
+    <div
+      ref={wrapRef}
+      className={cn(
+        'overflow-hidden border border-ink-10 bg-neft',
+        isFullscreen ? 'flex h-full w-full flex-col' : 'rounded-card',
+      )}
+    >
       <div className="flex items-center justify-between gap-3 border-b border-wisdom/10 px-4 py-2.5">
         <span className="truncate text-[0.72rem] uppercase tracking-wide text-wisdom/60">
-          SCORM · {title}
+          {displayTitle(title)}
         </span>
-        <a
-          href={src}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex shrink-0 items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
-        >
-          Открыть в новой вкладке <ArrowUpRight width={14} height={14} />
-        </a>
+        <div className="flex shrink-0 items-center gap-4">
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            className="inline-flex items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
+          >
+            {isFullscreen ? 'Свернуть' : 'На весь экран'}
+          </button>
+          <a
+            href={src}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
+          >
+            Открыть в новой вкладке <ArrowUpRight width={14} height={14} />
+          </a>
+        </div>
       </div>
-      <div className="relative aspect-video w-full bg-[#444c54]">
+      <div className={cn('relative w-full bg-[#444c54]', isFullscreen ? 'flex-1' : 'aspect-video')}>
         {ready && (
           <iframe
             src={src}
