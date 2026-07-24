@@ -123,6 +123,42 @@ async function runPool<T>(
 
 export type UploadProgress = (done: number, total: number) => void
 
+/**
+ * SDK @vercel/blob при неудаче запроса пресайнд-URL скрывает тело ответа
+ * сервера за фразой «Failed to retrieve the presigned URL». Повторяем запрос
+ * напрямую и достаём реальную причину, чтобы показать её администратору.
+ */
+async function withServerReason(
+  err: unknown,
+  mode: 'token' | 'presigned' | undefined,
+  pathname: string,
+  clientPayload: string,
+): Promise<Error> {
+  const original = err instanceof Error ? err : new Error('Не удалось загрузить файлы пакета')
+  if (mode !== 'presigned' || !/presigned URL|client token/i.test(original.message)) {
+    return original
+  }
+  try {
+    const resp = await fetch('/api/scorm/blob-upload', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'blob.generate-presigned-url',
+        payload: { pathname, clientPayload, multipart: false },
+      }),
+    })
+    if (!resp.ok) {
+      const data = (await resp.json().catch(() => null)) as { message?: string } | null
+      if (data?.message) {
+        return new Error(`${original.message}. Причина с сервера: ${data.message}`)
+      }
+    }
+  } catch {
+    /* сеть недоступна — оставляем исходную ошибку */
+  }
+  return original
+}
+
 export const scormStore = {
   async list(): Promise<ScormPackage[]> {
     return http<ScormPackage[]>('/scorm')
@@ -217,26 +253,30 @@ export const scormStore = {
     const putFile = pre.mode === 'presigned' ? uploadPresigned : upload
 
     let blobBase = ''
-    await runPool(
-      entries,
-      6,
-      async (entry) => {
-        const rel = entry.name.slice(manifestDir.length)
-        const blob = await entry.async('blob')
-        const result = await putFile(`scorm/${id}/${rel}`, blob, {
-          access: 'public',
-          handleUploadUrl: '/api/scorm/blob-upload',
-          contentType: mimeFor(rel),
-          clientPayload,
-          // Крупные файлы (видео, тяжёлые изображения) грузим частями. Multipart
-          // надёжно обходит любой лимит на размер одиночного запроса и устойчивее
-          // к обрывам сети; мелкие файлы (их большинство) — одним запросом.
-          multipart: blob.size > MULTIPART_THRESHOLD,
-        })
-        if (!blobBase) blobBase = new URL(result.url).origin
-      },
-      onProgress,
-    )
+    try {
+      await runPool(
+        entries,
+        6,
+        async (entry) => {
+          const rel = entry.name.slice(manifestDir.length)
+          const blob = await entry.async('blob')
+          const result = await putFile(`scorm/${id}/${rel}`, blob, {
+            access: 'public',
+            handleUploadUrl: '/api/scorm/blob-upload',
+            contentType: mimeFor(rel),
+            clientPayload,
+            // Крупные файлы (видео, тяжёлые изображения) грузим частями. Multipart
+            // надёжно обходит любой лимит на размер одиночного запроса и устойчивее
+            // к обрывам сети; мелкие файлы (их большинство) — одним запросом.
+            multipart: blob.size > MULTIPART_THRESHOLD,
+          })
+          if (!blobBase) blobBase = new URL(result.url).origin
+        },
+        onProgress,
+      )
+    } catch (err) {
+      throw await withServerReason(err, pre.mode, `scorm/${id}/${launch}`, clientPayload)
+    }
 
     const pkg: ScormPackage = {
       id,
