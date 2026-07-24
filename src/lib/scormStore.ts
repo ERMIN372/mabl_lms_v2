@@ -237,8 +237,21 @@ export const scormStore = {
       )
     }
     if (pre.mode === 'presigned' && pre.presignError) {
+      const raw = pre.presignError
+      // «Suspended» — это не проблема кода/настроек, а приостановка самого
+      // хранилища на стороне Vercel (обычно превышены лимиты бесплатного плана
+      // Hobby или биллинг). Ни загрузка, ни раздача файлов при этом не работают.
+      if (/suspend/i.test(raw)) {
+        throw new Error(
+          'Хранилище Vercel Blob приостановлено (suspended) на стороне Vercel — ' +
+            'пока оно в этом состоянии, не работают ни загрузка, ни отдача уже загруженных файлов. ' +
+            'Обычно причина — превышены лимиты бесплатного плана Hobby (операции/трафик) или вопрос с биллингом. ' +
+            'Что делать: Vercel → Storage → ваш Blob-store — проверьте статус и использование; ' +
+            'снимите приостановку (upgrade плана до Pro либо дождитесь сброса лимитов в новом цикле).',
+        )
+      }
       throw new Error(
-        `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${pre.presignError}` +
+        `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${raw}` +
           ' Обычно это выключенный OIDC у проекта: Vercel → Project Settings → Security →' +
           ' Secure Backend Access (OIDC) → Enabled, затем Redeploy Production.',
       )
