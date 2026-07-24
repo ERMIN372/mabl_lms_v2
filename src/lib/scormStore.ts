@@ -183,6 +183,7 @@ export const scormStore = {
       admin: boolean
       blob: boolean
       mode?: 'token' | 'presigned'
+      presignError?: string
       blobEnv?: string[]
     }>('/scorm/upload-preflight')
     if (!pre.admin) {
@@ -197,6 +198,13 @@ export const scormStore = {
           found +
           ' Как починить: Vercel → Storage → ваш Blob-store → вкладка Projects → Connect Project' +
           ' (подключение добавит переменные хранилища), затем Redeploy Production.',
+      )
+    }
+    if (pre.mode === 'presigned' && pre.presignError) {
+      throw new Error(
+        `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${pre.presignError}` +
+          ' Обычно это выключенный OIDC у проекта: Vercel → Project Settings → Security →' +
+          ' Secure Backend Access (OIDC) → Enabled, затем Redeploy Production.',
       )
     }
 

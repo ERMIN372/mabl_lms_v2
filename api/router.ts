@@ -349,10 +349,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // авторизуются самостоятельно). Клиент выбирает флоу загрузки по mode.
       const hasToken = Boolean(blobReadWriteToken())
       const hasOidcStore = Boolean(process.env.BLOB_STORE_ID)
+      // Пробная выдача подписанного токена: SDK на клиенте прячет причину
+      // отказа за общей фразой «Failed to retrieve the presigned URL», поэтому
+      // реальную ошибку (например, выключенный OIDC у проекта) ловим здесь и
+      // показываем администратору до начала загрузки.
+      let presignError: string | undefined
+      if (admin && !hasToken && hasOidcStore) {
+        try {
+          await issueSignedToken({
+            pathname: 'scorm/_preflight',
+            operations: ['put'],
+            validUntil: Date.now() + 60_000,
+          })
+        } catch (err) {
+          presignError = err instanceof Error ? err.message : String(err)
+          console.error('[scorm] preflight issueSignedToken error:', err)
+        }
+      }
       return res.json({
         admin,
         blob: hasToken || hasOidcStore,
         mode: hasToken ? 'token' : hasOidcStore ? 'presigned' : undefined,
+        presignError,
         // Имена (без значений) blob-переменных окружения — чтобы отличить
         // «хранилище не подключено» от «токен под нестандартным именем».
         blobEnv: admin
@@ -1339,6 +1357,9 @@ async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
     })
     return res.json(jsonResponse)
   } catch (err) {
+    // Клиентский SDK не показывает тело ответа — реальная причина видна
+    // только в серверных логах, поэтому пишем её туда обязательно.
+    console.error('[scorm] blob-upload error:', err)
     const message = err instanceof Error ? err.message : 'Ошибка загрузки в Blob'
     return res.status(400).json({ message })
   }
