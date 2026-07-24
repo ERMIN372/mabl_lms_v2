@@ -1294,7 +1294,22 @@ async function getScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
     scormFilesCache.set(id, map)
     return map
   }
-  return loadScormFileMap(id)
+
+  // Старый пакет без карты: разово перечисляем файлы и сохраняем карту в
+  // метаданные — чтобы дальше list() не вызывался (самоизлечение без перезаливки).
+  const map = await loadScormFileMap(id)
+  if (meta && map.size) {
+    try {
+      const files: Record<string, { u: string; s: number }> = {}
+      for (const [pathname, ref] of map) {
+        files[pathname.replace(`scorm/${id}/`, '')] = { u: ref.url, s: ref.size }
+      }
+      await saveScormPackage({ ...meta, files } as unknown as Record<string, unknown>)
+    } catch (err) {
+      console.error(`[scorm] не удалось сохранить карту файлов пакета «${id}»:`, err)
+    }
+  }
+  return map
 }
 
 /** Резервный источник карты — список файлов из хранилища (расходует advanced-операции). */
