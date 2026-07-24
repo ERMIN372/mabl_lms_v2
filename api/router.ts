@@ -4,7 +4,7 @@ import { getSql } from './_db.js'
 import { ensureSchema, initDatabase } from './_seed.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
-import { signToken, requireAdmin, verifyToken } from './_auth.js'
+import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
 import { handleUpload } from '@vercel/blob/client'
 import { list as blobList, del as blobDel } from '@vercel/blob'
 import type {
@@ -338,6 +338,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'scorm' && method === 'GET') {
       return res.json(await contentList<ScormPackageMeta>('scorm', []))
+    }
+    // Преflight перед загрузкой: сообщает клиенту конкретную причину отказа
+    // (истёкшая админ-сессия или неподключённое хранилище Blob), потому что SDK
+    // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
+    if (path === 'scorm/upload-preflight' && method === 'GET') {
+      const admin = verifyToken(bearer(req))?.kind === 'admin'
+      return res.json({
+        admin,
+        blob: Boolean(blobReadWriteToken()),
+        // Имена (без значений) blob-переменных окружения — чтобы отличить
+        // «хранилище не подключено» от «токен под нестандартным именем».
+        blobEnv: admin ? Object.keys(process.env).filter((k) => k.includes('BLOB')) : undefined,
+      })
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
       return await scormBlobUpload(req, res)
@@ -1213,12 +1226,24 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
 }
 
 /**
+ * RW-токен Vercel Blob. Обычно интеграция кладёт его в BLOB_READ_WRITE_TOKEN,
+ * но при кастомном имени/префиксе переменная может называться иначе
+ * (…_BLOB_READ_WRITE_TOKEN) — поэтому ищем и такой вариант.
+ */
+function blobReadWriteToken(): string | undefined {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
+  const key = Object.keys(process.env).find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN'))
+  return key ? process.env[key] : undefined
+}
+
+/**
  * Выдать клиенту токен прямой загрузки в Blob. Вызывается SDK @vercel/blob;
  * права администратора проверяем по токену сессии из clientPayload.
  */
 async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
   try {
     const jsonResponse = await handleUpload({
+      token: blobReadWriteToken(),
       body: parseBody(req) as unknown as Parameters<typeof handleUpload>[0]['body'],
       request: req as unknown as Request,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
