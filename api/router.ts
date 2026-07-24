@@ -5,8 +5,8 @@ import { ensureSchema, initDatabase } from './_seed.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
 import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
-import { handleUpload } from '@vercel/blob/client'
-import { list as blobList, del as blobDel } from '@vercel/blob'
+import { handleUpload, handleUploadPresigned } from '@vercel/blob/client'
+import { list as blobList, del as blobDel, issueSignedToken } from '@vercel/blob'
 import type {
   AdminUser,
   AppNotification,
@@ -344,12 +344,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
     if (path === 'scorm/upload-preflight' && method === 'GET') {
       const admin = verifyToken(bearer(req))?.kind === 'admin'
+      // Два способа записи в Blob: классический RW-токен либо OIDC-подключение
+      // store к проекту (Vercel выдаёт BLOB_STORE_ID вместо токена, и функции
+      // авторизуются самостоятельно). Клиент выбирает флоу загрузки по mode.
+      const hasToken = Boolean(blobReadWriteToken())
+      const hasOidcStore = Boolean(process.env.BLOB_STORE_ID)
+      // Пробная выдача подписанного токена: SDK на клиенте прячет причину
+      // отказа за общей фразой «Failed to retrieve the presigned URL», поэтому
+      // реальную ошибку (например, выключенный OIDC у проекта) ловим здесь и
+      // показываем администратору до начала загрузки.
+      let presignError: string | undefined
+      if (admin && !hasToken && hasOidcStore) {
+        try {
+          await issueSignedToken({
+            pathname: 'scorm/_preflight',
+            operations: ['put'],
+            validUntil: Date.now() + 60_000,
+          })
+        } catch (err) {
+          presignError = err instanceof Error ? err.message : String(err)
+          console.error('[scorm] preflight issueSignedToken error:', err)
+        }
+      }
       return res.json({
         admin,
-        blob: Boolean(blobReadWriteToken()),
+        blob: hasToken || hasOidcStore,
+        mode: hasToken ? 'token' : hasOidcStore ? 'presigned' : undefined,
+        presignError,
         // Имена (без значений) blob-переменных окружения — чтобы отличить
         // «хранилище не подключено» от «токен под нестандартным именем».
-        blobEnv: admin ? Object.keys(process.env).filter((k) => k.includes('BLOB')) : undefined,
+        blobEnv: admin
+          ? Object.keys(process.env).filter(
+              (k) => k.includes('BLOB') || k.endsWith('_READ_WRITE_TOKEN'),
+            )
+          : undefined,
       })
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
@@ -1204,20 +1232,49 @@ async function deleteScormPackage(id: string): Promise<void> {
   }
 }
 
+/**
+ * Страница ошибки раздачи SCORM. Показывается внутри iframe плеера, поэтому
+ * вместо голой строки отдаём аккуратную вёрстку: слушателю — общее сообщение,
+ * администратору — подсказку, как починить (перезагрузить пакет через админку).
+ */
+function scormErrorPage(res: VercelResponse, hint: string) {
+  res.setHeader('Content-Type', 'text/html;charset=utf-8')
+  return res.status(404).send(
+    `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Материалы недоступны</title></head>
+<body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f4f0;font-family:Georgia,serif;color:#1d232a">
+<div style="max-width:32rem;padding:2rem;text-align:center">
+<p style="font-size:1.4rem;margin:0 0 .75rem">Материалы курса временно недоступны</p>
+<p style="font-size:.95rem;color:#5a616a;margin:0">${hint}</p>
+</div></body></html>`,
+  )
+}
+
 /** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
 async function serveScormFile(id: string, rel: string, res: VercelResponse) {
-  if (!id || !rel) return res.status(404).send('SCORM-ресурс не найден')
+  if (!id || !rel) return scormErrorPage(res, 'Неверная ссылка на материалы. Обратитесь к администратору академии.')
   let base = scormBaseCache.get(id)
   if (!base) {
     const meta = await contentGet<ScormPackageMeta>('scorm', id)
     base = meta?.blobBase
     if (base) scormBaseCache.set(id, base)
   }
-  if (!base) return res.status(404).send('SCORM-пакет не найден')
+  if (!base) {
+    console.error(`[scorm] пакет «${id}» не найден в БД (файлы не загружены на сервер)`)
+    return scormErrorPage(
+      res,
+      'Пакет не найден в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели.',
+    )
+  }
 
   const encoded = rel.split('/').map(encodeURIComponent).join('/')
   const upstream = await fetch(`${base}/scorm/${id}/${encoded}`)
-  if (!upstream.ok) return res.status(404).send('SCORM-ресурс не найден')
+  if (!upstream.ok) {
+    console.error(`[scorm] файл «${rel}» пакета «${id}» отсутствует в Blob (HTTP ${upstream.status})`)
+    return scormErrorPage(
+      res,
+      'Файлы пакета отсутствуют в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели — курсы, использующие пакет, восстановятся автоматически.',
+    )
+  }
 
   const buf = Buffer.from(await upstream.arrayBuffer())
   res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
@@ -1232,31 +1289,66 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
  */
 function blobReadWriteToken(): string | undefined {
   if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
-  const key = Object.keys(process.env).find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN'))
+  const keys = Object.keys(process.env)
+  // Кастомный префикс интеграции даёт имена вида <PREFIX>_READ_WRITE_TOKEN —
+  // токен может вообще не содержать слова BLOB.
+  const key =
+    keys.find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN')) ??
+    keys.find((k) => k.endsWith('_READ_WRITE_TOKEN'))
   return key ? process.env[key] : undefined
 }
 
 /**
- * Выдать клиенту токен прямой загрузки в Blob. Вызывается SDK @vercel/blob;
- * права администратора проверяем по токену сессии из clientPayload.
+ * Авторизовать прямую загрузку клиента в Blob. Права администратора проверяем
+ * по токену сессии из clientPayload; путь ограничиваем префиксом scorm/.
+ *
+ * Поддерживаются оба флоу SDK @vercel/blob:
+ * - классический (blob.generate-client-token) — когда в окружении есть
+ *   RW-токен BLOB_READ_WRITE_TOKEN;
+ * - пресайнд (blob.generate-presigned-url) — когда store подключён к проекту
+ *   по OIDC (в окружении только BLOB_STORE_ID, функции авторизуются сами,
+ *   а мы подписываем короткоживущий токен через issueSignedToken).
  */
 async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
+  const assertAllowed = (pathname: string, clientPayload?: string | null) => {
+    let ok = false
+    try {
+      const parsed = clientPayload ? JSON.parse(clientPayload) : {}
+      const payload = verifyToken(parsed.token)
+      ok = payload?.kind === 'admin'
+    } catch {
+      ok = false
+    }
+    if (!ok) throw new Error('Требуются права администратора.')
+    if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
+  }
+
   try {
+    const body = parseBody(req) as { type?: string }
+
+    if (body?.type === 'blob.generate-presigned-url') {
+      const jsonResponse = await handleUploadPresigned({
+        body: body as unknown as Parameters<typeof handleUploadPresigned>[0]['body'],
+        request: req as unknown as Request,
+        getSignedToken: async (pathname, clientPayload) => {
+          assertAllowed(pathname, clientPayload)
+          const token = await issueSignedToken({
+            pathname,
+            operations: ['put'],
+            token: blobReadWriteToken(),
+          })
+          return { token, urlOptions: { addRandomSuffix: false, allowOverwrite: true } }
+        },
+      })
+      return res.json(jsonResponse)
+    }
+
     const jsonResponse = await handleUpload({
       token: blobReadWriteToken(),
-      body: parseBody(req) as unknown as Parameters<typeof handleUpload>[0]['body'],
+      body: body as unknown as Parameters<typeof handleUpload>[0]['body'],
       request: req as unknown as Request,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
-        let ok = false
-        try {
-          const parsed = clientPayload ? JSON.parse(clientPayload) : {}
-          const payload = verifyToken(parsed.token)
-          ok = payload?.kind === 'admin'
-        } catch {
-          ok = false
-        }
-        if (!ok) throw new Error('Требуются права администратора.')
-        if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
+        assertAllowed(pathname, clientPayload)
         return {
           addRandomSuffix: false,
           allowOverwrite: true,
@@ -1265,6 +1357,9 @@ async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
     })
     return res.json(jsonResponse)
   } catch (err) {
+    // Клиентский SDK не показывает тело ответа — реальная причина видна
+    // только в серверных логах, поэтому пишем её туда обязательно.
+    console.error('[scorm] blob-upload error:', err)
     const message = err instanceof Error ? err.message : 'Ошибка загрузки в Blob'
     return res.status(400).json({ message })
   }

@@ -17,8 +17,12 @@ export const scormApi = {
     return scormStore.list()
   },
 
-  async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
-    return scormStore.upload(file, onProgress)
+  async upload(
+    file: File,
+    onProgress?: UploadProgress,
+    confirmReplace?: (id: string) => boolean,
+  ): Promise<ScormPackage> {
+    return scormStore.upload(file, onProgress, confirmReplace)
   },
 
   async remove(id: string): Promise<void> {

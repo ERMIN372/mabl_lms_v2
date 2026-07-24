@@ -13,7 +13,7 @@
  * это работает только в пределах одного источника.
  */
 
-import { upload } from '@vercel/blob/client'
+import { upload, uploadPresigned } from '@vercel/blob/client'
 import { http, getToken } from '@/api/config'
 
 const BASE = '/scorm-store'
@@ -131,8 +131,16 @@ export const scormStore = {
   /**
    * Распаковать zip в браузере, залить файлы в Vercel Blob и сохранить
    * метаданные пакета в БД. Возвращает метаданные пакета.
+   *
+   * Если пакет с таким же id уже существует, confirmReplace решает, заменить ли
+   * его файлы (курсы со ссылкой на пакет продолжат работать с новой версией)
+   * или сохранить рядом как новый пакет с суффиксом в id.
    */
-  async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
+  async upload(
+    file: File,
+    onProgress?: UploadProgress,
+    confirmReplace?: (id: string) => boolean,
+  ): Promise<ScormPackage> {
     // JSZip подгружается отдельным чанком только при загрузке пакета.
     const { default: JSZip } = await import('jszip')
     const zip = await JSZip.loadAsync(file)
@@ -154,10 +162,11 @@ export const scormStore = {
       throw new Error('В манифесте не найдена точка входа (resource href).')
     }
 
-    // id должен быть уникальным среди уже загруженных пакетов (пути в Blob).
+    // id должен быть уникальным среди уже загруженных пакетов (пути в Blob),
+    // кроме случая осознанной замены существующего пакета его новой версией.
     const existing = new Set((await scormStore.list()).map((p) => p.id))
     let id = slugify(title ?? file.name.replace(/\.zip$/i, ''))
-    if (existing.has(id)) id = `${id}-${Date.now().toString(36)}`
+    if (existing.has(id) && !confirmReplace?.(id)) id = `${id}-${Date.now().toString(36)}`
 
     const entries = Object.values(zip.files).filter(
       (f) => !f.dir && f.name.startsWith(manifestDir),
@@ -168,25 +177,44 @@ export const scormStore = {
 
     // Преflight: заранее выясняем причину возможного отказа, потому что SDK
     // @vercel/blob при любой ошибке выдачи токена показывает лишь общую фразу
-    // «Failed to retrieve the client token».
-    const pre = await http<{ admin: boolean; blob: boolean; blobEnv?: string[] }>(
-      '/scorm/upload-preflight',
-    )
+    // «Failed to retrieve the client token». Заодно сервер сообщает режим
+    // авторизации хранилища: классический RW-токен или OIDC (пресайнд-URL).
+    const pre = await http<{
+      admin: boolean
+      blob: boolean
+      mode?: 'token' | 'presigned'
+      presignError?: string
+      blobEnv?: string[]
+    }>('/scorm/upload-preflight')
     if (!pre.admin) {
       throw new Error('Сессия администратора истекла. Выйдите и войдите снова, затем повторите загрузку.')
     }
     if (!pre.blob) {
       const found = pre.blobEnv?.length
-        ? ` Найдены переменные: ${pre.blobEnv.join(', ')} — похоже, токен под другим именем.`
-        : ' В окружении деплоя нет ни одной BLOB-переменной — сделайте свежий Redeploy Production после подключения хранилища.'
+        ? ` В окружении найдены переменные: ${pre.blobEnv.join(', ')}.`
+        : ' В окружении деплоя нет ни одной переменной Blob.'
       throw new Error(
-        'На сервере недоступен токен записи Vercel Blob (BLOB_READ_WRITE_TOKEN).' + found,
+        'Серверу недоступно хранилище Vercel Blob: нет ни BLOB_READ_WRITE_TOKEN, ни BLOB_STORE_ID.' +
+          found +
+          ' Как починить: Vercel → Storage → ваш Blob-store → вкладка Projects → Connect Project' +
+          ' (подключение добавит переменные хранилища), затем Redeploy Production.',
+      )
+    }
+    if (pre.mode === 'presigned' && pre.presignError) {
+      throw new Error(
+        `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${pre.presignError}` +
+          ' Обычно это выключенный OIDC у проекта: Vercel → Project Settings → Security →' +
+          ' Secure Backend Access (OIDC) → Enabled, затем Redeploy Production.',
       )
     }
 
     // Токен сессии администратора кладём в clientPayload — сервер проверяет
-    // права в /api/scorm/blob-upload перед выдачей токена загрузки.
+    // права в /api/scorm/blob-upload перед выдачей разрешения на загрузку.
     const clientPayload = JSON.stringify({ token: getToken() })
+    // При OIDC-подключении store у сервера нет RW-токена, из которого SDK
+    // делает классический клиентский токен, — вместо этого сервер подписывает
+    // пресайнд-URL на каждый файл (uploadPresigned).
+    const putFile = pre.mode === 'presigned' ? uploadPresigned : upload
 
     let blobBase = ''
     await runPool(
@@ -195,7 +223,7 @@ export const scormStore = {
       async (entry) => {
         const rel = entry.name.slice(manifestDir.length)
         const blob = await entry.async('blob')
-        const result = await upload(`scorm/${id}/${rel}`, blob, {
+        const result = await putFile(`scorm/${id}/${rel}`, blob, {
           access: 'public',
           handleUploadUrl: '/api/scorm/blob-upload',
           contentType: mimeFor(rel),
