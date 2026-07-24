@@ -6,7 +6,7 @@ import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
 import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
 import { handleUpload, handleUploadPresigned } from '@vercel/blob/client'
-import { list as blobList, del as blobDel, issueSignedToken } from '@vercel/blob'
+import { list as blobList, del as blobDel, issueSignedToken, presignUrl } from '@vercel/blob'
 import type {
   AdminUser,
   AppNotification,
@@ -1215,6 +1215,7 @@ async function saveScormPackage(body: Record<string, unknown>): Promise<ScormPac
       DO UPDATE SET data = ${JSON.stringify(meta)}::jsonb, updated_at = NOW()
   `
   if (meta.blobBase) scormBaseCache.set(id, meta.blobBase)
+  scormFilesCache.delete(id)
   return meta
 }
 
@@ -1224,6 +1225,7 @@ async function deleteScormPackage(id: string): Promise<void> {
   await ensureSchema(sql)
   await sql`DELETE FROM content WHERE collection = 'scorm' AND id = ${id}`
   scormBaseCache.delete(id)
+  scormFilesCache.delete(id)
   try {
     const { blobs } = await blobList({ prefix: `scorm/${id}/` })
     if (blobs.length) await blobDel(blobs.map((b) => b.url))
@@ -1249,27 +1251,82 @@ function scormErrorPage(res: VercelResponse, hint: string) {
   )
 }
 
+// Кэш «путь → канонический URL» файлов пакета из list(). URL из API хранилища
+// надёжнее, чем сборка адреса строкой: кириллические id, различия кодировок и
+// приватные blob'ы ломают «угаданные» адреса. Кэш обновляется при промахе и
+// сбрасывается при перезаписи/удалении пакета.
+const scormFilesCache = new Map<string, Map<string, string>>()
+
+async function loadScormFileMap(id: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>()
+  let cursor: string | undefined
+  do {
+    const page = await blobList({ prefix: `scorm/${id}/`, cursor })
+    for (const b of page.blobs) map.set(b.pathname, b.url)
+    cursor = page.hasMore ? page.cursor : undefined
+  } while (cursor)
+  scormFilesCache.set(id, map)
+  return map
+}
+
 /** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
 async function serveScormFile(id: string, rel: string, res: VercelResponse) {
   if (!id || !rel) return scormErrorPage(res, 'Неверная ссылка на материалы. Обратитесь к администратору академии.')
-  let base = scormBaseCache.get(id)
-  if (!base) {
-    const meta = await contentGet<ScormPackageMeta>('scorm', id)
-    base = meta?.blobBase
-    if (base) scormBaseCache.set(id, base)
-  }
-  if (!base) {
-    console.error(`[scorm] пакет «${id}» не найден в БД (файлы не загружены на сервер)`)
-    return scormErrorPage(
-      res,
-      'Пакет не найден в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели.',
-    )
+  const pathname = `scorm/${id}/${rel}`
+
+  // 1) Канонический URL файла из списка хранилища.
+  let url: string | undefined
+  try {
+    let files = scormFilesCache.get(id)
+    if (!files || !files.has(pathname)) files = await loadScormFileMap(id)
+    url = files.get(pathname)
+  } catch (err) {
+    console.error(`[scorm] не удалось получить список файлов пакета «${id}»:`, err)
   }
 
-  const encoded = rel.split('/').map(encodeURIComponent).join('/')
-  const upstream = await fetch(`${base}/scorm/${id}/${encoded}`)
+  // 2) Резерв для старых пакетов: адрес по blobBase из метаданных в БД.
+  if (!url) {
+    let base = scormBaseCache.get(id)
+    if (!base) {
+      const meta = await contentGet<ScormPackageMeta>('scorm', id)
+      base = meta?.blobBase
+      if (base) scormBaseCache.set(id, base)
+    }
+    if (!base) {
+      console.error(`[scorm] пакет «${id}» не найден ни в Blob, ни в БД`)
+      return scormErrorPage(
+        res,
+        'Пакет не найден в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели.',
+      )
+    }
+    url = `${base}/${pathname.split('/').map(encodeURIComponent).join('/')}`
+  }
+
+  let upstream = await fetch(url)
   if (!upstream.ok) {
-    console.error(`[scorm] файл «${rel}» пакета «${id}» отсутствует в Blob (HTTP ${upstream.status})`)
+    // Blob может быть приватным (у новых store приватный доступ по умолчанию) —
+    // тогда подписываем GET сами. Область токена '*' — из-за бага SDK с
+    // декодированием кириллических путей (см. getSignedToken выше).
+    try {
+      const token = await issueSignedToken({
+        pathname: '*',
+        operations: ['get'],
+        validUntil: Date.now() + 5 * 60_000,
+        token: blobReadWriteToken(),
+      })
+      const { presignedUrl } = await presignUrl(token, {
+        operation: 'get',
+        pathname,
+        access: 'private',
+      })
+      upstream = await fetch(presignedUrl)
+    } catch (err) {
+      console.error(`[scorm] не удалось подписать GET для «${pathname}»:`, err)
+    }
+  }
+
+  if (!upstream.ok) {
+    console.error(`[scorm] файл «${rel}» пакета «${id}» недоступен (HTTP ${upstream.status})`)
     return scormErrorPage(
       res,
       'Файлы пакета отсутствуют в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели — курсы, использующие пакет, восстановятся автоматически.',
