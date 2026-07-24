@@ -349,7 +349,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         blob: Boolean(blobReadWriteToken()),
         // Имена (без значений) blob-переменных окружения — чтобы отличить
         // «хранилище не подключено» от «токен под нестандартным именем».
-        blobEnv: admin ? Object.keys(process.env).filter((k) => k.includes('BLOB')) : undefined,
+        blobEnv: admin
+          ? Object.keys(process.env).filter(
+              (k) => k.includes('BLOB') || k.endsWith('_READ_WRITE_TOKEN'),
+            )
+          : undefined,
       })
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
@@ -1261,7 +1265,12 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
  */
 function blobReadWriteToken(): string | undefined {
   if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
-  const key = Object.keys(process.env).find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN'))
+  const keys = Object.keys(process.env)
+  // Кастомный префикс интеграции даёт имена вида <PREFIX>_READ_WRITE_TOKEN —
+  // токен может вообще не содержать слова BLOB.
+  const key =
+    keys.find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN')) ??
+    keys.find((k) => k.endsWith('_READ_WRITE_TOKEN'))
   return key ? process.env[key] : undefined
 }
 

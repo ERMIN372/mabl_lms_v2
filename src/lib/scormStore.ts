@@ -186,10 +186,14 @@ export const scormStore = {
     }
     if (!pre.blob) {
       const found = pre.blobEnv?.length
-        ? ` Найдены переменные: ${pre.blobEnv.join(', ')} — похоже, токен под другим именем.`
-        : ' В окружении деплоя нет ни одной BLOB-переменной — сделайте свежий Redeploy Production после подключения хранилища.'
+        ? ` В окружении есть переменные хранилища (${pre.blobEnv.join(', ')}), но токена записи среди них нет.`
+        : ' В окружении деплоя нет ни одной переменной Blob.'
       throw new Error(
-        'На сервере недоступен токен записи Vercel Blob (BLOB_READ_WRITE_TOKEN).' + found,
+        'На сервере недоступен токен записи Vercel Blob (BLOB_READ_WRITE_TOKEN).' +
+          found +
+          ' Как починить: Vercel → Storage → ваш Blob-store → вкладка Projects → подключите проект' +
+          ' (это добавит BLOB_READ_WRITE_TOKEN во все окружения), либо скопируйте токен из настроек' +
+          ' store и добавьте переменную BLOB_READ_WRITE_TOKEN вручную. Затем Redeploy Production.',
       )
     }
 
