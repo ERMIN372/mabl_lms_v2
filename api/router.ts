@@ -5,8 +5,8 @@ import { ensureSchema, initDatabase } from './_seed.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
 import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
-import { handleUpload } from '@vercel/blob/client'
-import { list as blobList, del as blobDel } from '@vercel/blob'
+import { handleUpload, handleUploadPresigned } from '@vercel/blob/client'
+import { list as blobList, del as blobDel, issueSignedToken } from '@vercel/blob'
 import type {
   AdminUser,
   AppNotification,
@@ -344,9 +344,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
     if (path === 'scorm/upload-preflight' && method === 'GET') {
       const admin = verifyToken(bearer(req))?.kind === 'admin'
+      // Два способа записи в Blob: классический RW-токен либо OIDC-подключение
+      // store к проекту (Vercel выдаёт BLOB_STORE_ID вместо токена, и функции
+      // авторизуются самостоятельно). Клиент выбирает флоу загрузки по mode.
+      const hasToken = Boolean(blobReadWriteToken())
+      const hasOidcStore = Boolean(process.env.BLOB_STORE_ID)
       return res.json({
         admin,
-        blob: Boolean(blobReadWriteToken()),
+        blob: hasToken || hasOidcStore,
+        mode: hasToken ? 'token' : hasOidcStore ? 'presigned' : undefined,
         // Имена (без значений) blob-переменных окружения — чтобы отличить
         // «хранилище не подключено» от «токен под нестандартным именем».
         blobEnv: admin
@@ -1275,26 +1281,56 @@ function blobReadWriteToken(): string | undefined {
 }
 
 /**
- * Выдать клиенту токен прямой загрузки в Blob. Вызывается SDK @vercel/blob;
- * права администратора проверяем по токену сессии из clientPayload.
+ * Авторизовать прямую загрузку клиента в Blob. Права администратора проверяем
+ * по токену сессии из clientPayload; путь ограничиваем префиксом scorm/.
+ *
+ * Поддерживаются оба флоу SDK @vercel/blob:
+ * - классический (blob.generate-client-token) — когда в окружении есть
+ *   RW-токен BLOB_READ_WRITE_TOKEN;
+ * - пресайнд (blob.generate-presigned-url) — когда store подключён к проекту
+ *   по OIDC (в окружении только BLOB_STORE_ID, функции авторизуются сами,
+ *   а мы подписываем короткоживущий токен через issueSignedToken).
  */
 async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
+  const assertAllowed = (pathname: string, clientPayload?: string | null) => {
+    let ok = false
+    try {
+      const parsed = clientPayload ? JSON.parse(clientPayload) : {}
+      const payload = verifyToken(parsed.token)
+      ok = payload?.kind === 'admin'
+    } catch {
+      ok = false
+    }
+    if (!ok) throw new Error('Требуются права администратора.')
+    if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
+  }
+
   try {
+    const body = parseBody(req) as { type?: string }
+
+    if (body?.type === 'blob.generate-presigned-url') {
+      const jsonResponse = await handleUploadPresigned({
+        body: body as unknown as Parameters<typeof handleUploadPresigned>[0]['body'],
+        request: req as unknown as Request,
+        getSignedToken: async (pathname, clientPayload) => {
+          assertAllowed(pathname, clientPayload)
+          const token = await issueSignedToken({
+            pathname,
+            operations: ['put'],
+            token: blobReadWriteToken(),
+          })
+          return { token, urlOptions: { addRandomSuffix: false, allowOverwrite: true } }
+        },
+      })
+      return res.json(jsonResponse)
+    }
+
     const jsonResponse = await handleUpload({
       token: blobReadWriteToken(),
-      body: parseBody(req) as unknown as Parameters<typeof handleUpload>[0]['body'],
+      body: body as unknown as Parameters<typeof handleUpload>[0]['body'],
       request: req as unknown as Request,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
-        let ok = false
-        try {
-          const parsed = clientPayload ? JSON.parse(clientPayload) : {}
-          const payload = verifyToken(parsed.token)
-          ok = payload?.kind === 'admin'
-        } catch {
-          ok = false
-        }
-        if (!ok) throw new Error('Требуются права администратора.')
-        if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
+        assertAllowed(pathname, clientPayload)
         return {
           addRandomSuffix: false,
           allowOverwrite: true,

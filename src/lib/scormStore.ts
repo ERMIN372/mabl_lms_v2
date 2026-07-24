@@ -13,7 +13,7 @@
  * это работает только в пределах одного источника.
  */
 
-import { upload } from '@vercel/blob/client'
+import { upload, uploadPresigned } from '@vercel/blob/client'
 import { http, getToken } from '@/api/config'
 
 const BASE = '/scorm-store'
@@ -177,29 +177,36 @@ export const scormStore = {
 
     // Преflight: заранее выясняем причину возможного отказа, потому что SDK
     // @vercel/blob при любой ошибке выдачи токена показывает лишь общую фразу
-    // «Failed to retrieve the client token».
-    const pre = await http<{ admin: boolean; blob: boolean; blobEnv?: string[] }>(
-      '/scorm/upload-preflight',
-    )
+    // «Failed to retrieve the client token». Заодно сервер сообщает режим
+    // авторизации хранилища: классический RW-токен или OIDC (пресайнд-URL).
+    const pre = await http<{
+      admin: boolean
+      blob: boolean
+      mode?: 'token' | 'presigned'
+      blobEnv?: string[]
+    }>('/scorm/upload-preflight')
     if (!pre.admin) {
       throw new Error('Сессия администратора истекла. Выйдите и войдите снова, затем повторите загрузку.')
     }
     if (!pre.blob) {
       const found = pre.blobEnv?.length
-        ? ` В окружении есть переменные хранилища (${pre.blobEnv.join(', ')}), но токена записи среди них нет.`
+        ? ` В окружении найдены переменные: ${pre.blobEnv.join(', ')}.`
         : ' В окружении деплоя нет ни одной переменной Blob.'
       throw new Error(
-        'На сервере недоступен токен записи Vercel Blob (BLOB_READ_WRITE_TOKEN).' +
+        'Серверу недоступно хранилище Vercel Blob: нет ни BLOB_READ_WRITE_TOKEN, ни BLOB_STORE_ID.' +
           found +
-          ' Как починить: Vercel → Storage → ваш Blob-store → вкладка Projects → подключите проект' +
-          ' (это добавит BLOB_READ_WRITE_TOKEN во все окружения), либо скопируйте токен из настроек' +
-          ' store и добавьте переменную BLOB_READ_WRITE_TOKEN вручную. Затем Redeploy Production.',
+          ' Как починить: Vercel → Storage → ваш Blob-store → вкладка Projects → Connect Project' +
+          ' (подключение добавит переменные хранилища), затем Redeploy Production.',
       )
     }
 
     // Токен сессии администратора кладём в clientPayload — сервер проверяет
-    // права в /api/scorm/blob-upload перед выдачей токена загрузки.
+    // права в /api/scorm/blob-upload перед выдачей разрешения на загрузку.
     const clientPayload = JSON.stringify({ token: getToken() })
+    // При OIDC-подключении store у сервера нет RW-токена, из которого SDK
+    // делает классический клиентский токен, — вместо этого сервер подписывает
+    // пресайнд-URL на каждый файл (uploadPresigned).
+    const putFile = pre.mode === 'presigned' ? uploadPresigned : upload
 
     let blobBase = ''
     await runPool(
@@ -208,7 +215,7 @@ export const scormStore = {
       async (entry) => {
         const rel = entry.name.slice(manifestDir.length)
         const blob = await entry.async('blob')
-        const result = await upload(`scorm/${id}/${rel}`, blob, {
+        const result = await putFile(`scorm/${id}/${rel}`, blob, {
           access: 'public',
           handleUploadUrl: '/api/scorm/blob-upload',
           contentType: mimeFor(rel),
