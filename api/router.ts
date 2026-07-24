@@ -1330,20 +1330,21 @@ async function diagnoseScormPackage(id: string) {
   report.fileCount = files.size
 
   const check = async (pathname: string, ref: ScormFileRef) => {
-    const big = ref.size > SCORM_PROXY_LIMIT
-    // Прямой публичный URL.
+    const via = ref.size > SCORM_PROXY_LIMIT ? 'redirect' : 'proxy'
+    // Проверяем доступ так же, как это делает браузер: GET с Range на 1 байт
+    // (для крупных файлов не тянем весь объём; HEAD публичные blob отклоняют).
+    const range = { headers: { Range: 'bytes=0-0' } }
     let status: number | string = 'no-url'
-    let via = big ? 'redirect' : 'proxy'
     try {
-      const head = await fetch(ref.url, { method: big ? 'HEAD' : 'GET' })
-      status = head.status
-      if (head.ok) return { ok: true, via: `${via}/public`, status }
+      const pub = await fetch(ref.url, range)
+      status = pub.status
+      if (pub.ok) return { ok: true, via: `${via}/public`, status }
     } catch (err) {
       status = err instanceof Error ? err.message : 'fetch-error'
     }
-    // Подписанный (для приватных blob).
+    // Резерв: подписанная ссылка (на случай приватного blob).
     try {
-      const signed = await fetch(await presignScormGet(pathname), { method: big ? 'HEAD' : 'GET' })
+      const signed = await fetch(await presignScormGet(pathname), range)
       status = signed.status
       if (signed.ok) return { ok: true, via: `${via}/signed`, status }
     } catch (err) {
@@ -1392,17 +1393,12 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
   let url = file?.url
 
   // Крупные файлы не пролезают в лимит ответа функции (4,5 МБ) — отдаём
-  // редиректом на само хранилище (для приватных blob — по подписанной ссылке).
+  // редиректом прямо на публичный URL из хранилища. HEAD-проверку не делаем:
+  // публичные blob Vercel отвечают на HEAD отказом, и это ошибочно уводило
+  // на приватную подписанную ссылку, которая для публичного файла даёт 403.
   if (file && file.size > SCORM_PROXY_LIMIT) {
-    let target = file.url
-    try {
-      const head = await fetch(file.url, { method: 'HEAD' })
-      if (!head.ok) target = await presignScormGet(pathname)
-    } catch (err) {
-      console.error(`[scorm] не удалось проверить доступ к «${pathname}»:`, err)
-    }
     res.setHeader('Cache-Control', 'public, max-age=600')
-    return res.redirect(302, target)
+    return res.redirect(302, file.url)
   }
 
   // 2) Резерв для старых пакетов: адрес по blobBase из метаданных в БД.
