@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/Button'
 import { ArrowUpRight, Clipboard } from '@/components/ui/Icon'
 import { AdminPageHeader } from '@/components/admin/AdminUI'
 import { api } from '@/api'
-import type { ScormPackage } from '@/api'
+import type { ScormPackage, ScormProbe, ScormBlobStatus, ScormLastError } from '@/api'
 import { useCourses } from '@/context/CoursesContext'
 import { formatDateTime } from '@/lib/utils'
 import type { Course } from '@/types'
@@ -19,7 +19,29 @@ export default function AdminScormPage() {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [creatingId, setCreatingId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [blobReady, setBlobReady] = useState<boolean | null>(null)
+  const [health, setHealth] = useState<Record<string, ScormProbe>>({})
+  const [blobStatus, setBlobStatus] = useState<ScormBlobStatus | null>(null)
+  const [lastError, setLastError] = useState<ScormLastError | null>(null)
+  const [checking, setChecking] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  const runDiagnostics = async () => {
+    setChecking(true)
+    try {
+      const [status, probes, last] = await Promise.all([
+        api.scorm.status(),
+        api.scorm.probe(),
+        api.scorm.lastError(),
+      ])
+      setBlobStatus(status)
+      setBlobReady(status.configured)
+      setHealth(Object.fromEntries(probes.map((p) => [p.id, p])))
+      setLastError(last)
+    } finally {
+      setChecking(false)
+    }
+  }
 
   const uploadLabel = busy
     ? progress
@@ -31,6 +53,7 @@ export default function AdminScormPage() {
 
   useEffect(() => {
     refresh()
+    runDiagnostics()
   }, [])
 
   const onUpload = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -42,6 +65,7 @@ export default function AdminScormPage() {
     try {
       await api.scorm.upload(file, (done, total) => setProgress({ done, total }))
       await refresh()
+      await runDiagnostics()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить пакет')
     } finally {
@@ -98,6 +122,7 @@ export default function AdminScormPage() {
     if (window.confirm(`Удалить пакет «${pkg.title}»? Курсы со ссылкой на него перестанут работать.`)) {
       await api.scorm.remove(pkg.id)
       await refresh()
+      await runDiagnostics()
     }
   }
 
@@ -122,6 +147,17 @@ export default function AdminScormPage() {
         }
       />
 
+      {blobReady === false && (
+        <div className="mt-6 rounded-token border border-amber-400/50 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="font-semibold">Хранилище файлов не подключено</p>
+          <p className="mt-1">
+            Загрузка SCORM недоступна: в проекте Vercel не подключено Blob-хранилище. Откройте проект
+            на Vercel → <span className="font-medium">Storage → Create → Blob → Connect</span>, затем
+            сделайте <span className="font-medium">Redeploy</span>.
+          </p>
+        </div>
+      )}
+
       {error && (
         <div className="mt-6 rounded-token border border-ocean/40 bg-oceanc-10 px-4 py-3 text-sm text-ocean">
           {error}
@@ -143,7 +179,10 @@ export default function AdminScormPage() {
               >
                 <div className="min-w-0 md:col-span-5">
                   <p className="truncate font-serif text-lg text-neft">{pkg.title}</p>
-                  <p className="text-[0.74rem] text-ink-60">{pkg.fileCount} файлов</p>
+                  <p className="flex items-center gap-2 text-[0.74rem] text-ink-60">
+                    <span>{pkg.fileCount} файлов</span>
+                    <HealthBadge probe={health[pkg.id]} />
+                  </p>
                 </div>
                 <div className="text-sm text-ink-60 md:col-span-3">{formatDateTime(pkg.uploadedAt)}</div>
                 <div className="flex flex-wrap gap-1 md:col-span-4 md:flex-nowrap md:justify-end">
@@ -186,6 +225,87 @@ export default function AdminScormPage() {
           </Button>
         </div>
       )}
+
+      {/* Диагностика хранилища — видно, какой пакет здоров и в чём ошибка. */}
+      <div className="mt-10 rounded-card border border-ink-10 bg-ink-5/40 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-serif text-lg text-neft">Диагностика хранилища</h2>
+          <button
+            onClick={runDiagnostics}
+            disabled={checking}
+            className="rounded-token px-3 py-1.5 text-[0.7rem] font-semibold uppercase tracking-wide text-ink-60 hover:bg-ink-5 hover:text-neft disabled:opacity-50"
+          >
+            {checking ? 'Проверяю…' : 'Проверить снова'}
+          </button>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+          <span className="text-ink-60">Хранилище Vercel Blob:</span>
+          {blobStatus?.configured ? (
+            <span className="font-medium text-emerald-600">подключено ✓</span>
+          ) : (
+            <span className="font-medium text-ocean">не подключено ✗</span>
+          )}
+          {blobStatus?.tokens && blobStatus.tokens.length > 0 && (
+            <span className="text-[0.74rem] text-ink-40">
+              (переменные: {blobStatus.tokens.join(', ')})
+            </span>
+          )}
+        </div>
+
+        {packages.length > 0 && (
+          <ul className="mt-3 space-y-1.5 text-sm">
+            {packages.map((pkg) => {
+              const probe = health[pkg.id]
+              const ok = probe?.status === 200
+              return (
+                <li key={pkg.id} className="flex flex-wrap items-center gap-2">
+                  <span className={ok ? 'text-emerald-600' : 'text-ocean'}>{ok ? '✓' : '✗'}</span>
+                  <span className="truncate text-neft">{pkg.title}</span>
+                  {probe && !ok && (
+                    <span className="text-[0.74rem] text-ocean">
+                      launch-файл недоступен (
+                      {probe.status === -1 ? 'сетевой сбой' : `HTTP ${probe.status}`}) — перезалейте
+                      пакет
+                    </span>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        {lastError?.message ? (
+          <div className="mt-4">
+            <p className="text-[0.72rem] font-semibold uppercase tracking-wide text-ink-60">
+              Последняя серверная ошибка
+              {lastError.at ? ` · ${formatDateTime(lastError.at)}` : ''}
+            </p>
+            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-token border border-ink-10 bg-wisdom p-3 text-[0.72rem] leading-relaxed text-ink-80">
+              {lastError.message}
+            </pre>
+          </div>
+        ) : (
+          <p className="mt-4 text-[0.74rem] text-ink-40">Серверных ошибок не зафиксировано.</p>
+        )}
+      </div>
     </div>
+  )
+}
+
+/** Бейдж состояния пакета: доступен ли его launch-файл. */
+function HealthBadge({ probe }: { probe?: ScormProbe }) {
+  if (!probe) return null
+  if (probe.status === 200) {
+    return (
+      <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[0.66rem] font-semibold uppercase tracking-wide text-emerald-600">
+        Доступен
+      </span>
+    )
+  }
+  return (
+    <span className="rounded-full bg-oceanc-10 px-2 py-0.5 text-[0.66rem] font-semibold uppercase tracking-wide text-ocean">
+      Проблема · {probe.status === -1 ? 'сеть' : `HTTP ${probe.status}`}
+    </span>
   )
 }
