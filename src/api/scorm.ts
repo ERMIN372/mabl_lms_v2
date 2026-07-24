@@ -1,7 +1,13 @@
 import { scormStore } from '@/lib/scormStore'
-import type { ScormPackage, UploadProgress } from '@/lib/scormStore'
+import type {
+  ScormPackage,
+  UploadProgress,
+  ScormBlobStatus,
+  ScormProbe,
+  ScormLastError,
+} from '@/lib/scormStore'
 
-export type { ScormPackage } from '@/lib/scormStore'
+export type { ScormPackage, ScormProbe, ScormBlobStatus, ScormLastError } from '@/lib/scormStore'
 
 /**
  * Ресурс «SCORM-пакеты».
@@ -15,6 +21,18 @@ export type { ScormPackage } from '@/lib/scormStore'
 export const scormApi = {
   async list(): Promise<ScormPackage[]> {
     return scormStore.list()
+  },
+
+  async status(): Promise<ScormBlobStatus> {
+    return scormStore.status()
+  },
+
+  async probe(): Promise<ScormProbe[]> {
+    return scormStore.probe()
+  },
+
+  async lastError(): Promise<ScormLastError> {
+    return scormStore.lastError()
   },
 
   async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {

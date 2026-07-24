@@ -13,16 +13,13 @@
  * это работает только в пределах одного источника.
  */
 
-import { upload } from '@vercel/blob/client'
+import { uploadPresigned } from '@vercel/blob/client'
 import { http, getToken } from '@/api/config'
 
 const BASE = '/scorm-store'
 
-/**
- * Порог, выше которого файл грузится в Blob частями (multipart). Так снимается
- * зависимость от лимита на размер одиночного запроса — крупные ассеты в пакете
- * (видео, PNG на несколько МБ) больше не приводят к ошибке 413.
- */
+/** Порог, выше которого файл грузится частями (multipart) — обходит лимит на
+ * размер одиночного запроса, крупные ассеты (видео, тяжёлые PNG) не дают 413. */
 const MULTIPART_THRESHOLD = 4 * 1024 * 1024
 
 export interface ScormPackage {
@@ -36,6 +33,8 @@ export interface ScormPackage {
   uploadedAt: string
   /** Origin хранилища Blob (для прокси). Проставляется при загрузке. */
   blobBase?: string
+  /** Карта путь-в-пакете → фактический URL файла в Blob (авторитетно для раздачи). */
+  files?: Record<string, string>
 }
 
 const MIME: Record<string, string> = {
@@ -72,9 +71,21 @@ function mimeFor(path: string): string {
 }
 
 function slugify(value: string): string {
+  // Транслитерируем кириллицу в латиницу: путь к файлам в Blob должен быть
+  // ASCII. Иначе Blob API портит UTF-8 в scope signed-token и presigned-загрузка
+  // падает с «Blob path does not match the signed token scope».
+  const map: Record<string, string> = {
+    а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z',
+    и: 'i', й: 'i', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r',
+    с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch',
+    ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya', ' ': '-',
+  }
   const base = value
     .toLowerCase()
-    .replace(/[^a-z0-9а-яё]+/gi, '-')
+    .split('')
+    .map((ch) => (ch in map ? map[ch] : /[a-z0-9-]/.test(ch) ? ch : ''))
+    .join('')
+    .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
   return (base || 'scorm').slice(0, 40)
 }
@@ -123,9 +134,56 @@ async function runPool<T>(
 
 export type UploadProgress = (done: number, total: number) => void
 
+export interface ScormBlobStatus {
+  configured: boolean
+  /** Имена найденных BLOB-переменных окружения (без значений). */
+  tokens?: string[]
+}
+
+export interface ScormProbe {
+  id: string
+  launch: string
+  /** HTTP-статус launch-файла: 200 — здоров, иначе проблема (-1 — сетевой сбой). */
+  status: number
+  error?: string
+  hasFilesMap?: boolean
+}
+
+export interface ScormLastError {
+  message: string | null
+  at?: string
+}
+
 export const scormStore = {
   async list(): Promise<ScormPackage[]> {
     return http<ScormPackage[]>('/scorm')
+  },
+
+  /** Подключено ли хранилище Vercel Blob (иначе загрузка невозможна). */
+  async status(): Promise<ScormBlobStatus> {
+    try {
+      return await http<ScormBlobStatus>('/scorm/blob-status')
+    } catch {
+      return { configured: false }
+    }
+  },
+
+  /** Проверка доступности launch-файла каждого пакета (для диагностики). */
+  async probe(): Promise<ScormProbe[]> {
+    try {
+      return await http<ScormProbe[]>('/scorm/blob-probe')
+    } catch {
+      return []
+    }
+  },
+
+  /** Последняя серверная ошибка загрузки/раздачи (для диагностики). */
+  async lastError(): Promise<ScormLastError> {
+    try {
+      return await http<ScormLastError>('/scorm/blob-last-error')
+    } catch {
+      return { message: null }
+    }
   },
 
   /**
@@ -133,8 +191,16 @@ export const scormStore = {
    * метаданные пакета в БД. Возвращает метаданные пакета.
    */
   async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
-    // JSZip подгружается отдельным чанком только при загрузке пакета.
-    const { default: JSZip } = await import('jszip')
+    // JSZip подгружается отдельным чанком только при загрузке пакета. Если сайт
+    // обновился, пока вкладка была открыта, старый чанк уже удалён с сервера —
+    // просим перезагрузить страницу вместо загадочной ошибки import.
+    const JSZip = await import('jszip')
+      .then((m) => m.default)
+      .catch(() => {
+        throw new Error(
+          'Вышло обновление сайта — перезагрузите страницу (Ctrl+F5 / Cmd+Shift+R) и повторите загрузку.',
+        )
+      })
     const zip = await JSZip.loadAsync(file)
 
     // Находим манифест (обычно в корне).
@@ -166,45 +232,38 @@ export const scormStore = {
       throw new Error('SCORM-пакет пуст: внутри архива нет файлов.')
     }
 
-    // Преflight: заранее выясняем причину возможного отказа, потому что SDK
-    // @vercel/blob при любой ошибке выдачи токена показывает лишь общую фразу
-    // «Failed to retrieve the client token».
-    const pre = await http<{ admin: boolean; blob: boolean; blobEnv?: string[] }>(
-      '/scorm/upload-preflight',
-    )
-    if (!pre.admin) {
-      throw new Error('Сессия администратора истекла. Выйдите и войдите снова, затем повторите загрузку.')
-    }
-    if (!pre.blob) {
-      const found = pre.blobEnv?.length
-        ? ` Найдены переменные: ${pre.blobEnv.join(', ')} — похоже, токен под другим именем.`
-        : ' В окружении деплоя нет ни одной BLOB-переменной — сделайте свежий Redeploy Production после подключения хранилища.'
-      throw new Error(
-        'На сервере недоступен токен записи Vercel Blob (BLOB_READ_WRITE_TOKEN).' + found,
-      )
+    // Почтовые шлюзы и антивирусы «обезвреживают» архивы, переименовывая скрипты
+    // .js → .j_ (реже .js_). Манифест и index.html при этом ссылаются на .js, и
+    // пакет не запускается ни в одной LMS. Восстанавливаем исходные имена, если
+    // одноимённого .js в архиве нет.
+    const relNames = new Set(entries.map((f) => f.name.slice(manifestDir.length)))
+    const restoreSanitizedExt = (rel: string): string => {
+      const fixed = rel.replace(/\.js_$/i, '.js').replace(/\.j_$/i, '.js')
+      return fixed !== rel && !relNames.has(fixed) ? fixed : rel
     }
 
     // Токен сессии администратора кладём в clientPayload — сервер проверяет
-    // права в /api/scorm/blob-upload перед выдачей токена загрузки.
+    // права в /api/scorm/blob-upload перед выдачей presigned-URL.
     const clientPayload = JSON.stringify({ token: getToken() })
 
     let blobBase = ''
+    const files: Record<string, string> = {}
+    // Файлы грузим напрямую в Blob по presigned-URL (авторизация сервера — OIDC).
+    // Крупные файлы — частями (multipart), чтобы не упереться в лимит 4.5 МБ.
     await runPool(
       entries,
       6,
       async (entry) => {
-        const rel = entry.name.slice(manifestDir.length)
+        const rel = restoreSanitizedExt(entry.name.slice(manifestDir.length))
         const blob = await entry.async('blob')
-        const result = await upload(`scorm/${id}/${rel}`, blob, {
+        const result = await uploadPresigned(`scorm/${id}/${rel}`, blob, {
           access: 'public',
           handleUploadUrl: '/api/scorm/blob-upload',
           contentType: mimeFor(rel),
           clientPayload,
-          // Крупные файлы (видео, тяжёлые изображения) грузим частями. Multipart
-          // надёжно обходит любой лимит на размер одиночного запроса и устойчивее
-          // к обрывам сети; мелкие файлы (их большинство) — одним запросом.
           multipart: blob.size > MULTIPART_THRESHOLD,
         })
+        files[rel] = result.url
         if (!blobBase) blobBase = new URL(result.url).origin
       },
       onProgress,
@@ -218,6 +277,7 @@ export const scormStore = {
       fileCount: entries.length,
       uploadedAt: new Date().toISOString(),
       blobBase,
+      files,
     }
 
     // Сохраняем метаданные в БД (доступно всем устройствам).
