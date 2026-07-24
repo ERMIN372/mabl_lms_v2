@@ -383,6 +383,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (path === 'scorm/blob-upload' && method === 'POST') {
       return await scormBlobUpload(req, res)
     }
+    // Диагностика пакета: проверяет каждый файл так, как его отдаёт раздача,
+    // и возвращает по нему реальный HTTP-статус. Только для администратора.
+    if (segments[0] === 'scorm' && segments.length === 3 && segments[2] === 'diagnose' && method === 'GET') {
+      if (verifyToken(bearer(req))?.kind !== 'admin') {
+        return res.status(403).json({ message: 'Требуются права администратора.' })
+      }
+      return res.json(await diagnoseScormPackage(decodeURIComponent(segments[1])))
+    }
     if (path === 'scorm' && method === 'POST') {
       return res.status(201).json(await saveScormPackage(parseBody(req)))
     }
@@ -1292,6 +1300,79 @@ async function presignScormGet(pathname: string): Promise<string> {
   })
   const { presignedUrl } = await presignUrl(token, { operation: 'get', pathname, access: 'private' })
   return presignedUrl
+}
+
+/**
+ * Диагностика пакета: для каждого файла воспроизводит путь раздачи и фиксирует
+ * реальный результат — чтобы понять, что именно не открывается у слушателя,
+ * без DevTools и гаданий.
+ */
+async function diagnoseScormPackage(id: string) {
+  const started = Date.now()
+  const report = {
+    id,
+    mode: blobReadWriteToken() ? 'token' : process.env.BLOB_STORE_ID ? 'oidc' : 'none',
+    fileCount: 0,
+    okCount: 0,
+    failed: [] as Array<{ path: string; sizeKb: number; via: string; status: number | string }>,
+    listError: undefined as string | undefined,
+    tookMs: 0,
+  }
+
+  let files: Map<string, ScormFileRef>
+  try {
+    files = await loadScormFileMap(id)
+  } catch (err) {
+    report.listError = err instanceof Error ? err.message : String(err)
+    report.tookMs = Date.now() - started
+    return report
+  }
+  report.fileCount = files.size
+
+  const check = async (pathname: string, ref: ScormFileRef) => {
+    const big = ref.size > SCORM_PROXY_LIMIT
+    // Прямой публичный URL.
+    let status: number | string = 'no-url'
+    let via = big ? 'redirect' : 'proxy'
+    try {
+      const head = await fetch(ref.url, { method: big ? 'HEAD' : 'GET' })
+      status = head.status
+      if (head.ok) return { ok: true, via: `${via}/public`, status }
+    } catch (err) {
+      status = err instanceof Error ? err.message : 'fetch-error'
+    }
+    // Подписанный (для приватных blob).
+    try {
+      const signed = await fetch(await presignScormGet(pathname), { method: big ? 'HEAD' : 'GET' })
+      status = signed.status
+      if (signed.ok) return { ok: true, via: `${via}/signed`, status }
+    } catch (err) {
+      status = err instanceof Error ? err.message : 'sign-error'
+    }
+    return { ok: false, via, status }
+  }
+
+  // Ограничиваем параллелизм, чтобы не упереться в лимиты.
+  const entries = [...files.entries()]
+  for (let i = 0; i < entries.length; i += 8) {
+    const batch = entries.slice(i, i + 8)
+    const results = await Promise.all(batch.map(([p, ref]) => check(p, ref)))
+    results.forEach((r, j) => {
+      const [pathname, ref] = batch[j]
+      if (r.ok) {
+        report.okCount += 1
+      } else {
+        report.failed.push({
+          path: pathname.replace(`scorm/${id}/`, ''),
+          sizeKb: Math.round(ref.size / 1024),
+          via: r.via,
+          status: r.status,
+        })
+      }
+    })
+  }
+  report.tookMs = Date.now() - started
+  return report
 }
 
 /** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
