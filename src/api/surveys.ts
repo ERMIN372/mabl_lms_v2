@@ -1,17 +1,21 @@
 import type { Survey } from '@/types'
-import { surveys } from '@/data/surveys'
-import { USE_MOCK, http, mockDelay } from './config'
+import { http } from './config'
 
-/** Ресурс «Опросники». */
+/** Ресурс «Опросники». Данные хранятся в БД. */
 export const surveysApi = {
   async list(): Promise<Survey[]> {
-    if (!USE_MOCK) return http<Survey[]>('/surveys')
-    await mockDelay()
-    return surveys
+    return http<Survey[]>('/surveys')
   },
   async get(id: string): Promise<Survey | undefined> {
-    if (!USE_MOCK) return http<Survey>(`/surveys/${id}`)
-    await mockDelay()
-    return surveys.find((s) => s.id === id)
+    return http<Survey>(`/surveys/${id}`)
+  },
+  async create(survey: Survey): Promise<Survey> {
+    return http<Survey>('/surveys', { method: 'POST', body: JSON.stringify(survey) })
+  },
+  async update(id: string, patch: Partial<Survey>): Promise<Survey> {
+    return http<Survey>(`/surveys/${id}`, { method: 'PUT', body: JSON.stringify(patch) })
+  },
+  async remove(id: string): Promise<void> {
+    return http<void>(`/surveys/${id}`, { method: 'DELETE' })
   },
 }

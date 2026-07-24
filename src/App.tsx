@@ -40,6 +40,11 @@ import AdminNewsPage from './pages/admin/AdminNewsPage'
 import AdminNewsEditPage from './pages/admin/AdminNewsEditPage'
 import AdminForumPage from './pages/admin/AdminForumPage'
 import AdminForumTopicEditPage from './pages/admin/AdminForumTopicEditPage'
+import AdminMaterialsPage from './pages/admin/AdminMaterialsPage'
+import AdminMaterialEditPage from './pages/admin/AdminMaterialEditPage'
+import AdminSurveysPage from './pages/admin/AdminSurveysPage'
+import AdminSurveyEditPage from './pages/admin/AdminSurveyEditPage'
+import AdminNotificationsPage from './pages/admin/AdminNotificationsPage'
 import AdminDatabasePage from './pages/admin/AdminDatabasePage'
 import OfferPage from './pages/OfferPage'
 import PrivacyPage from './pages/PrivacyPage'
@@ -115,6 +120,13 @@ export default function App() {
           <Route path="/admin/forum" element={<AdminForumPage />} />
           <Route path="/admin/forum/new" element={<AdminForumTopicEditPage />} />
           <Route path="/admin/forum/:id" element={<AdminForumTopicEditPage />} />
+          <Route path="/admin/materials" element={<AdminMaterialsPage />} />
+          <Route path="/admin/materials/new" element={<AdminMaterialEditPage />} />
+          <Route path="/admin/materials/:id" element={<AdminMaterialEditPage />} />
+          <Route path="/admin/surveys" element={<AdminSurveysPage />} />
+          <Route path="/admin/surveys/new" element={<AdminSurveyEditPage />} />
+          <Route path="/admin/surveys/:id" element={<AdminSurveyEditPage />} />
+          <Route path="/admin/notifications" element={<AdminNotificationsPage />} />
           <Route path="/admin/database" element={<AdminDatabasePage />} />
         </Route>
 

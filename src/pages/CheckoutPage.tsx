@@ -11,7 +11,7 @@ import { Check, Lock } from '@/components/ui/Icon'
 import { useCourses } from '@/context/CoursesContext'
 import { usePurchases } from '@/context/PurchaseContext'
 import { useAuth } from '@/context/AuthContext'
-import { formatPrice } from '@/lib/utils'
+import { formatPrice, formatDuration, displayTitle } from '@/lib/utils'
 import { courseFormatLabel } from '@/lib/labels'
 
 export default function CheckoutPage() {
@@ -38,6 +38,15 @@ export default function CheckoutPage() {
   )
 
   const alreadyOwned = useMemo(() => (course ? isOwned(course.id) : false), [course, isOwned])
+  const isFreeCourse = !!course && course.price === 0
+
+  // Бесплатные курсы не требуют оплаты — сразу открываем доступ.
+  useEffect(() => {
+    if (course && isFreeCourse && !alreadyOwned) {
+      grantCourseAccess(course.id)
+      setDone(true)
+    }
+  }, [course, isFreeCourse, alreadyOwned, grantCourseAccess])
 
   // Возврат с ЮKassa: подтверждаем оплату по номеру заказа.
   useEffect(() => {
@@ -136,7 +145,7 @@ export default function CheckoutPage() {
           </span>
           <h1 className="mt-6 font-serif text-3xl text-neft">Доступ открыт</h1>
           <p className="mt-3 text-ink-60">
-            Курс «{course.title}» добавлен в ваш личный кабинет. Можно приступать к обучению.
+            Курс «{displayTitle(course.title)}» добавлен в ваш личный кабинет. Можно приступать к обучению.
           </p>
           {txId && (
             <p className="mt-4 text-[0.72rem] uppercase tracking-wide text-ink-40">
@@ -219,7 +228,7 @@ export default function CheckoutPage() {
               <Crest className="relative h-14 w-14" onDark />
               <div className="relative">
                 <p className="text-[0.7rem] uppercase tracking-wide text-wisdom/50">Программа</p>
-                <p className="font-serif text-lg leading-tight">{course.title}</p>
+                <p className="font-serif text-lg leading-tight">{displayTitle(course.title)}</p>
               </div>
             </div>
             <div className="space-y-4 p-6">
@@ -229,7 +238,7 @@ export default function CheckoutPage() {
               </div>
               <dl className="space-y-2 text-sm">
                 <div className="flex justify-between"><dt className="text-ink-60">Преподаватель</dt><dd className="text-neft">{course.instructor}</dd></div>
-                <div className="flex justify-between"><dt className="text-ink-60">Объём</dt><dd className="text-neft">{course.durationHours} ч · {course.lessonsCount} уроков</dd></div>
+                <div className="flex justify-between"><dt className="text-ink-60">Объём</dt><dd className="text-neft">{formatDuration(course.durationHours)} · {course.lessonsCount} уроков</dd></div>
               </dl>
               <div className="flex items-center justify-between border-t border-ink-10 pt-4">
                 <span className="text-sm uppercase tracking-wide text-ink-60">Итого</span>

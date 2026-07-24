@@ -98,6 +98,19 @@ export async function ensureSchema(sql: Sql): Promise<void> {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `
+  // Универсальное хранилище коллекций контента (события, материалы, опросники,
+  // разделы и темы форума, уведомления). Ключ — пара (collection, id).
+  await sql`
+    CREATE TABLE IF NOT EXISTS content (
+      collection TEXT NOT NULL,
+      id TEXT NOT NULL,
+      data JSONB NOT NULL,
+      sort_order INT DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (collection, id)
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_content_collection ON content (collection, sort_order)`
 }
 
 /** Полная инициализация: схема + сиды курсов и аккаунтов (без перезаписи существующих). */

@@ -11,7 +11,7 @@ import { ScormPlayer } from '@/components/ScormPlayer'
 import type { ScormStatus } from '@/components/ScormPlayer'
 import { useCourses } from '@/context/CoursesContext'
 import { usePurchases } from '@/context/PurchaseContext'
-import { formatPrice, cn } from '@/lib/utils'
+import { formatPrice, formatDuration, displayTitle, cn } from '@/lib/utils'
 import { courseFormatLabel } from '@/lib/labels'
 import type { Lesson } from '@/types'
 
@@ -135,11 +135,11 @@ export default function CourseDetailPage() {
                 <Badge tone="ocean">{courseFormatLabel[course.format]}</Badge>
                 <Badge tone="dark" className="ring-1 ring-wisdom/20">{course.level}</Badge>
               </div>
-              <h1 className="mt-5 font-serif text-4xl leading-tight md:text-5xl">{course.title}</h1>
+              <h1 className="mt-5 font-serif text-4xl leading-tight md:text-5xl">{displayTitle(course.title)}</h1>
               <p className="mt-4 max-w-2xl text-lg text-wisdom/70">{course.subtitle}</p>
               <div className="mt-6 flex flex-wrap gap-x-8 gap-y-2 text-sm text-wisdom/60">
                 <span>Преподаватель: {course.instructor}</span>
-                <span>{course.durationHours} часов</span>
+                <span>{formatDuration(course.durationHours)}</span>
                 <span>{course.lessonsCount} уроков</span>
               </div>
             </div>

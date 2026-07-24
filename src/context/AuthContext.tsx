@@ -2,7 +2,6 @@ import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { User } from '@/types'
 import { api } from '@/api'
-import type { DemoAccount } from '@/api'
 
 /**
  * Сессия пользователя. Учётные данные проверяет слой данных (`api.auth`),
@@ -34,8 +33,6 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<User>
   logout: () => void
   recover: (email: string) => Promise<string>
-  /** Демо-аккаунты для быстрого входа на экране авторизации. */
-  demoAccounts: DemoAccount[]
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -61,7 +58,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return account
   }
 
-  const logout = () => setUser(null)
+  const logout = () => {
+    api.auth.logout()
+    setUser(null)
+  }
 
   const recover = (email: string) => api.auth.recover(email)
 
@@ -73,7 +73,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       logout,
       recover,
-      demoAccounts: api.auth.demoAccounts(),
     }),
     [user],
   )

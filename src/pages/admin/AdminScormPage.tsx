@@ -16,8 +16,16 @@ export default function AdminScormPage() {
   const { addCourse } = useCourses()
   const [packages, setPackages] = useState<ScormPackage[]>([])
   const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const [creatingId, setCreatingId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+
+  const uploadLabel = busy
+    ? progress
+      ? `Загрузка ${progress.done}/${progress.total}…`
+      : 'Загрузка…'
+    : '+ Загрузить SCORM (.zip)'
 
   const refresh = async () => setPackages(await api.scorm.list())
 
@@ -29,19 +37,24 @@ export default function AdminScormPage() {
     const file = e.target.files?.[0]
     if (!file) return
     setBusy(true)
+    setProgress(null)
     setError('')
     try {
-      await api.scorm.upload(file)
+      await api.scorm.upload(file, (done, total) => setProgress({ done, total }))
       await refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить пакет')
     } finally {
       setBusy(false)
+      setProgress(null)
       if (fileRef.current) fileRef.current.value = ''
     }
   }
 
   const onCreateCourse = async (pkg: ScormPackage) => {
+    if (creatingId) return
+    setError('')
+    setCreatingId(pkg.id)
     const draft: Course = {
       id: '',
       title: pkg.title,
@@ -71,8 +84,14 @@ export default function AdminScormPage() {
         },
       ],
     }
-    const id = await addCourse(draft)
-    navigate(`/admin/courses/${id}`)
+    try {
+      const id = await addCourse(draft)
+      navigate(`/admin/courses/${id}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось создать курс из пакета')
+    } finally {
+      setCreatingId(null)
+    }
   }
 
   const onRemove = async (pkg: ScormPackage) => {
@@ -97,7 +116,7 @@ export default function AdminScormPage() {
               onChange={onUpload}
             />
             <Button onClick={() => fileRef.current?.click()} size="sm" disabled={busy}>
-              {busy ? 'Загрузка…' : '+ Загрузить SCORM (.zip)'}
+              {uploadLabel}
             </Button>
           </>
         }
@@ -136,8 +155,13 @@ export default function AdminScormPage() {
                   >
                     Открыть <ArrowUpRight width={14} height={14} />
                   </a>
-                  <Button onClick={() => onCreateCourse(pkg)} variant="ghost" size="sm">
-                    Создать курс
+                  <Button
+                    onClick={() => onCreateCourse(pkg)}
+                    variant="ghost"
+                    size="sm"
+                    disabled={creatingId !== null}
+                  >
+                    {creatingId === pkg.id ? 'Создаём…' : 'Создать курс'}
                   </Button>
                   <button
                     onClick={() => onRemove(pkg)}
@@ -158,7 +182,7 @@ export default function AdminScormPage() {
           <p className="mt-4 font-serif text-xl text-neft">Пока нет загруженных пакетов</p>
           <p className="mt-2 text-ink-60">Загрузите .zip с SCORM-пакетом, чтобы подключить его к программе.</p>
           <Button onClick={() => fileRef.current?.click()} size="sm" className="mt-6" disabled={busy}>
-            {busy ? 'Загрузка…' : '+ Загрузить SCORM (.zip)'}
+            {uploadLabel}
           </Button>
         </div>
       )}

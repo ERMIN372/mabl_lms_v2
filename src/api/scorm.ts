@@ -1,25 +1,24 @@
 import { scormStore } from '@/lib/scormStore'
-import type { ScormPackage } from '@/lib/scormStore'
+import type { ScormPackage, UploadProgress } from '@/lib/scormStore'
 
 export type { ScormPackage } from '@/lib/scormStore'
 
 /**
  * Ресурс «SCORM-пакеты».
  *
- * Пакеты обрабатываются ТОЛЬКО на клиенте (Cache Storage + Service Worker,
- * см. src/lib/scormStore.ts) независимо от режима API. SCORM-пакет — это
- * статика, которую браузер проигрывает напрямую, поэтому гонять его через
- * бэкенд незачем. Кроме того, загрузка через серверную функцию невозможна:
- * Vercel ограничивает тело запроса 4.5 МБ и возвращает 413 на типичных
- * SCORM-архивах, а серверной распаковки/хостинга в API нет.
+ * Файлы пакета распаковываются в браузере и грузятся напрямую в Vercel Blob
+ * (прямая загрузка обходит лимит тела запроса Vercel 4.5 МБ), а метаданные
+ * пакета хранятся в общей БД. Отдаются файлы через прокси на нашем домене
+ * (/scorm-store/<id>/...), поэтому пакет доступен со всех устройств.
+ * Подробности — src/lib/scormStore.ts и api/router.ts.
  */
 export const scormApi = {
   async list(): Promise<ScormPackage[]> {
     return scormStore.list()
   },
 
-  async upload(file: File): Promise<ScormPackage> {
-    return scormStore.upload(file)
+  async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
+    return scormStore.upload(file, onProgress)
   },
 
   async remove(id: string): Promise<void> {

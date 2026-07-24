@@ -1,12 +1,18 @@
 import type { AppNotification } from '@/types'
-import { notifications } from '@/data/notifications'
-import { USE_MOCK, http, mockDelay } from './config'
+import { http } from './config'
 
-/** Ресурс «Уведомления». */
+/** Ресурс «Уведомления». Данные хранятся в БД. */
 export const notificationsApi = {
   async list(): Promise<AppNotification[]> {
-    if (!USE_MOCK) return http<AppNotification[]>('/notifications')
-    await mockDelay()
-    return notifications
+    return http<AppNotification[]>('/notifications')
+  },
+  async create(note: AppNotification): Promise<AppNotification> {
+    return http<AppNotification>('/notifications', { method: 'POST', body: JSON.stringify(note) })
+  },
+  async update(id: string, patch: Partial<AppNotification>): Promise<AppNotification> {
+    return http<AppNotification>(`/notifications/${id}`, { method: 'PUT', body: JSON.stringify(patch) })
+  },
+  async remove(id: string): Promise<void> {
+    return http<void>(`/notifications/${id}`, { method: 'DELETE' })
   },
 }

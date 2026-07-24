@@ -35,6 +35,5 @@ export const api = {
   payments: paymentsApi,
 }
 
-export { USE_MOCK, API_URL, ApiError } from './config'
-export type { DemoAccount } from './auth'
+export { API_URL, ApiError } from './config'
 export type { ScormPackage } from './scorm'

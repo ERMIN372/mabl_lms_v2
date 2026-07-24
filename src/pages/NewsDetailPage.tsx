@@ -48,11 +48,11 @@ export default function NewsDetailPage() {
         {gallery.length > 1 ? (
           <Carousel images={gallery} className="my-10" />
         ) : gallery.length === 1 ? (
-          <div className="my-10 flex justify-center overflow-hidden rounded-card bg-neft">
+          <div className="my-10 overflow-hidden rounded-card">
             <img
               src={gallery[0]}
               alt=""
-              className="max-h-[32rem] w-full object-contain"
+              className="aspect-video w-full object-cover"
             />
           </div>
         ) : (

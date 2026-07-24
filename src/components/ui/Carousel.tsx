@@ -48,7 +48,7 @@ export function Carousel({
   return (
     <div
       className={cn(
-        'group relative flex items-center justify-center overflow-hidden rounded-card bg-ink-5',
+        'group relative overflow-hidden rounded-card',
         className,
       )}
       onTouchStart={onTouchStart}
@@ -58,7 +58,7 @@ export function Carousel({
         key={index}
         src={images[index]}
         alt=""
-        className="block max-h-[34rem] w-auto max-w-full animate-fadeIn"
+        className="block aspect-video w-full object-cover animate-fadeIn"
       />
 
       {count > 1 && (

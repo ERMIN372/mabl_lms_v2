@@ -1,29 +1,36 @@
 /**
  * Конфигурация слоя данных.
  *
- * Приложение общается с данными ТОЛЬКО через модули `src/api/*`. Сейчас активен
- * mock-режим (данные из локальных файлов и localStorage), но каждый ресурс уже
- * имеет http-реализацию. Переключение — через переменные окружения, без правок
- * в компонентах:
- *
- *   VITE_API_MODE=http
- *   VITE_API_URL=https://api.mabl.ru
- *
- * Это первый шаг «выхода из демо»: когда появится реальный бэкенд, достаточно
- * задать переменные окружения — UI менять не придётся.
+ * Приложение общается с данными ТОЛЬКО через модули `src/api/*`, которые ходят
+ * на реальный бэкенд (`/api/*`, serverless-функции + БД Neon). Демонстрационный
+ * mock-режим удалён — для работы нужен бэкенд и заданная переменная окружения
+ * `DATABASE_URL`.
  */
 
-const MODE = import.meta.env.VITE_API_MODE ?? 'mock'
-
-/** true — данные берутся из локальных mock-источников; false — из реального API. */
-export const USE_MOCK = MODE !== 'http'
-
-/** Базовый URL реального API. */
+/** Базовый URL API. По умолчанию — относительный путь `/api` (тот же домен). */
 export const API_URL = import.meta.env.VITE_API_URL ?? '/api'
 
-/** Имитация сетевой задержки, чтобы UI был готов к асинхронности заранее. */
-export const mockDelay = (ms = 200): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms))
+/** Ключ хранения токена сессии. */
+const TOKEN_KEY = 'mabl.auth.token'
+
+/** Токен текущей сессии (для авторизованных запросов к API). */
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+/** Сохранить/очистить токен сессии. */
+export function setToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token)
+    else localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    /* localStorage недоступен — игнорируем */
+  }
+}
 
 /** Ошибка обращения к API с HTTP-статусом (если есть). */
 export class ApiError extends Error {
@@ -35,10 +42,15 @@ export class ApiError extends Error {
   }
 }
 
-/** Базовый HTTP-клиент для реального бэкенда (используется http-реализациями). */
+/** Базовый HTTP-клиент: подставляет токен сессии и разворачивает ошибки API. */
 export async function http<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken()
   const res = await fetch(`${API_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers ?? {}),
+    },
     ...options,
   })
 

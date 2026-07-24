@@ -5,7 +5,6 @@ import { Badge } from '@/components/ui/Badge'
 import { AdminPageHeader, StatCard } from '@/components/admin/AdminUI'
 import { api } from '@/api'
 import type { DbStatus, DbUser } from '@/api/database'
-import { USE_MOCK } from '@/api'
 import { cn } from '@/lib/utils'
 
 type Notice = { tone: 'ok' | 'err'; text: string } | null
@@ -60,12 +59,6 @@ export default function AdminDatabasePage() {
           </Button>
         }
       />
-
-      {USE_MOCK && (
-        <div className="mt-6 rounded-card border border-ink-20 bg-ink-5 px-4 py-3 text-sm text-ink-80">
-          Демо-режим: показаны учебные данные. Реальная база подключается при <code>VITE_API_MODE=http</code>.
-        </div>
-      )}
 
       {notice && (
         <div

@@ -4,6 +4,8 @@ import { Logo } from '../brand/Logo'
 import { Button } from '../ui/Button'
 import {
   ArrowUpRight,
+  Bell,
+  Book,
   Calendar,
   Chat,
   Clipboard,
@@ -29,6 +31,9 @@ const adminNav = [
   { to: '/admin/events', label: 'События', icon: Calendar, end: false },
   { to: '/admin/news', label: 'Новости', icon: Newspaper, end: false },
   { to: '/admin/forum', label: 'Форум', icon: Chat, end: false },
+  { to: '/admin/materials', label: 'Материалы', icon: Book, end: false },
+  { to: '/admin/surveys', label: 'Опросники', icon: Clipboard, end: false },
+  { to: '/admin/notifications', label: 'Уведомления', icon: Bell, end: false },
   { to: '/admin/database', label: 'База данных', icon: Lock, end: false },
 ]
 
