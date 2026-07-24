@@ -25,6 +25,14 @@ const BASE = '/scorm-store'
  */
 const MULTIPART_THRESHOLD = 4 * 1024 * 1024
 
+/** Каноничный адрес файла в хранилище и его размер (для выбора способа раздачи). */
+export interface ScormFileRef {
+  /** URL файла в Blob. */
+  u: string
+  /** Размер в байтах. */
+  s: number
+}
+
 export interface ScormPackage {
   id: string
   title: string
@@ -36,6 +44,12 @@ export interface ScormPackage {
   uploadedAt: string
   /** Origin хранилища Blob (для прокси). Проставляется при загрузке. */
   blobBase?: string
+  /**
+   * Карта «путь внутри пакета → адрес и размер файла в Blob». Сохраняется при
+   * загрузке, чтобы раздача брала адреса из БД и НЕ вызывала list() на каждый
+   * запрос (list — «advanced operation» Vercel Blob со строгим лимитом).
+   */
+  files?: Record<string, ScormFileRef>
 }
 
 const MIME: Record<string, string> = {
@@ -266,6 +280,7 @@ export const scormStore = {
     const putFile = pre.mode === 'presigned' ? uploadPresigned : upload
 
     let blobBase = ''
+    const files: Record<string, ScormFileRef> = {}
     try {
       await runPool(
         entries,
@@ -284,6 +299,9 @@ export const scormStore = {
             multipart: blob.size > MULTIPART_THRESHOLD,
           })
           if (!blobBase) blobBase = new URL(result.url).origin
+          // Запоминаем каноничный адрес и размер файла — раздача возьмёт их из
+          // метаданных, не вызывая list() (экономим advanced-операции Blob).
+          files[rel] = { u: result.url, s: blob.size }
         },
         onProgress,
       )
@@ -297,6 +315,7 @@ export const scormStore = {
       launch,
       launchUrl: `${BASE}/${id}/${launch}`,
       fileCount: entries.length,
+      files,
       uploadedAt: new Date().toISOString(),
       blobBase,
     }

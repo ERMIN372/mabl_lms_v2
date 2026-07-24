@@ -61,10 +61,6 @@ export default function AdminScormPage() {
   const navigate = useNavigate()
   const { addCourse } = useCourses()
   const [packages, setPackages] = useState<ScormPackage[]>([])
-  // Доступность пакета в серверном хранилище: id → доступен ли launch-файл.
-  // Ловит пакеты, оставшиеся только в кэше браузера загрузившего (старый формат):
-  // у админа такой пакет открывался, а у остальных пользователей — нет.
-  const [available, setAvailable] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [creatingId, setCreatingId] = useState<string | null>(null)
@@ -79,20 +75,11 @@ export default function AdminScormPage() {
       : 'Загрузка…'
     : '+ Загрузить SCORM (.zip)'
 
+  // Доступность файлов пакета не проверяем автоматически на каждой загрузке
+  // страницы — это лишние обращения к раздаче. Для проверки есть кнопка
+  // «Диагностика» у каждого пакета.
   const refresh = async () => {
-    const list = await api.scorm.list()
-    setPackages(list)
-    const checks = await Promise.all(
-      list.map(async (pkg) => {
-        try {
-          const resp = await fetch(pkg.launchUrl, { cache: 'no-store' })
-          return [pkg.id, resp.ok] as const
-        } catch {
-          return [pkg.id, false] as const
-        }
-      }),
-    )
-    setAvailable(Object.fromEntries(checks))
+    setPackages(await api.scorm.list())
   }
 
   useEffect(() => {
@@ -237,12 +224,6 @@ export default function AdminScormPage() {
                 <div className="min-w-0 md:col-span-5">
                   <p className="truncate font-serif text-lg text-neft">{pkg.title}</p>
                   <p className="text-[0.74rem] text-ink-60">{pkg.fileCount} файлов</p>
-                  {available[pkg.id] === false && (
-                    <p className="mt-1 text-[0.74rem] font-semibold text-ocean">
-                      Недоступен в серверном хранилище — у слушателей курс не открывается.
-                      Загрузите этот пакет заново (файлы заменятся, курсы восстановятся).
-                    </p>
-                  )}
                 </div>
                 <div className="text-sm text-ink-60 md:col-span-3">{formatDateTime(pkg.uploadedAt)}</div>
                 <div className="flex flex-wrap gap-1 md:col-span-4 md:flex-nowrap md:justify-end">

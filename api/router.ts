@@ -1171,6 +1171,12 @@ interface ScormPackageMeta {
   uploadedAt: string
   /** Origin хранилища Blob, например https://xxxx.public.blob.vercel-storage.com */
   blobBase?: string
+  /**
+   * Карта «путь внутри пакета → {u: URL, s: размер}». Проставляется при загрузке,
+   * чтобы раздача брала адреса отсюда и не вызывала list() (advanced-операция
+   * Vercel Blob со строгим лимитом на бесплатном плане).
+   */
+  files?: Record<string, { u: string; s: number }>
 }
 
 const SCORM_MIME: Record<string, string> = {
@@ -1269,6 +1275,29 @@ interface ScormFileRef {
 }
 const scormFilesCache = new Map<string, Map<string, ScormFileRef>>()
 
+/**
+ * Карта файлов пакета. Сначала — из метаданных в БД (без единой Blob-операции),
+ * и только для старых пакетов без карты — разовый list() как резерв. list —
+ * «advanced operation» Vercel Blob со строгим месячным лимитом, поэтому в
+ * горячем пути раздачи его быть не должно.
+ */
+async function getScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
+  const cached = scormFilesCache.get(id)
+  if (cached) return cached
+
+  const meta = await contentGet<ScormPackageMeta>('scorm', id)
+  if (meta?.files && Object.keys(meta.files).length) {
+    const map = new Map<string, ScormFileRef>()
+    for (const [rel, ref] of Object.entries(meta.files)) {
+      map.set(`scorm/${id}/${rel}`, { url: ref.u, size: ref.s })
+    }
+    scormFilesCache.set(id, map)
+    return map
+  }
+  return loadScormFileMap(id)
+}
+
+/** Резервный источник карты — список файлов из хранилища (расходует advanced-операции). */
 async function loadScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
   const map = new Map<string, ScormFileRef>()
   let cursor: string | undefined
@@ -1321,7 +1350,7 @@ async function diagnoseScormPackage(id: string) {
 
   let files: Map<string, ScormFileRef>
   try {
-    files = await loadScormFileMap(id)
+    files = await getScormFileMap(id)
   } catch (err) {
     report.listError = err instanceof Error ? err.message : String(err)
     report.tookMs = Date.now() - started
@@ -1381,14 +1410,13 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
   if (!id || !rel) return scormErrorPage(res, 'Неверная ссылка на материалы. Обратитесь к администратору академии.')
   const pathname = `scorm/${id}/${rel}`
 
-  // 1) Канонический URL файла из списка хранилища.
+  // 1) Канонический URL файла из карты пакета (метаданные БД, без Blob-операций).
   let file: ScormFileRef | undefined
   try {
-    let files = scormFilesCache.get(id)
-    if (!files || !files.has(pathname)) files = await loadScormFileMap(id)
+    const files = await getScormFileMap(id)
     file = files.get(pathname)
   } catch (err) {
-    console.error(`[scorm] не удалось получить список файлов пакета «${id}»:`, err)
+    console.error(`[scorm] не удалось получить карту файлов пакета «${id}»:`, err)
   }
   let url = file?.url
 
