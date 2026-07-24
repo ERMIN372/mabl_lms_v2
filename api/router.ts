@@ -1251,22 +1251,47 @@ function scormErrorPage(res: VercelResponse, hint: string) {
   )
 }
 
-// Кэш «путь → канонический URL» файлов пакета из list(). URL из API хранилища
-// надёжнее, чем сборка адреса строкой: кириллические id, различия кодировок и
-// приватные blob'ы ломают «угаданные» адреса. Кэш обновляется при промахе и
-// сбрасывается при перезаписи/удалении пакета.
-const scormFilesCache = new Map<string, Map<string, string>>()
+// Кэш «путь → канонический URL и размер» файлов пакета из list(). URL из API
+// хранилища надёжнее, чем сборка адреса строкой: кириллические id, различия
+// кодировок и приватные blob'ы ломают «угаданные» адреса. Кэш обновляется при
+// промахе и сбрасывается при перезаписи/удалении пакета.
+interface ScormFileRef {
+  url: string
+  size: number
+}
+const scormFilesCache = new Map<string, Map<string, ScormFileRef>>()
 
-async function loadScormFileMap(id: string): Promise<Map<string, string>> {
-  const map = new Map<string, string>()
+async function loadScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
+  const map = new Map<string, ScormFileRef>()
   let cursor: string | undefined
   do {
     const page = await blobList({ prefix: `scorm/${id}/`, cursor })
-    for (const b of page.blobs) map.set(b.pathname, b.url)
+    for (const b of page.blobs) map.set(b.pathname, { url: b.url, size: b.size })
     cursor = page.hasMore ? page.cursor : undefined
   } while (cursor)
   scormFilesCache.set(id, map)
   return map
+}
+
+/**
+ * Порог проксирования: у serverless-функций Vercel лимит тела ответа 4,5 МБ,
+ * поэтому крупные файлы (видео, тяжёлые изображения) отдаём 302-редиректом
+ * прямо на хранилище, а не через буфер функции.
+ */
+const SCORM_PROXY_LIMIT = 3.5 * 1024 * 1024
+
+/** Подписанный GET-адрес файла (для приватных blob). */
+async function presignScormGet(pathname: string): Promise<string> {
+  const token = await issueSignedToken({
+    // Область '*' — из-за бага SDK с декодированием кириллических путей
+    // (см. комментарий в getSignedToken).
+    pathname: '*',
+    operations: ['get'],
+    validUntil: Date.now() + 60 * 60_000,
+    token: blobReadWriteToken(),
+  })
+  const { presignedUrl } = await presignUrl(token, { operation: 'get', pathname, access: 'private' })
+  return presignedUrl
 }
 
 /** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
@@ -1275,13 +1300,28 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
   const pathname = `scorm/${id}/${rel}`
 
   // 1) Канонический URL файла из списка хранилища.
-  let url: string | undefined
+  let file: ScormFileRef | undefined
   try {
     let files = scormFilesCache.get(id)
     if (!files || !files.has(pathname)) files = await loadScormFileMap(id)
-    url = files.get(pathname)
+    file = files.get(pathname)
   } catch (err) {
     console.error(`[scorm] не удалось получить список файлов пакета «${id}»:`, err)
+  }
+  let url = file?.url
+
+  // Крупные файлы не пролезают в лимит ответа функции (4,5 МБ) — отдаём
+  // редиректом на само хранилище (для приватных blob — по подписанной ссылке).
+  if (file && file.size > SCORM_PROXY_LIMIT) {
+    let target = file.url
+    try {
+      const head = await fetch(file.url, { method: 'HEAD' })
+      if (!head.ok) target = await presignScormGet(pathname)
+    } catch (err) {
+      console.error(`[scorm] не удалось проверить доступ к «${pathname}»:`, err)
+    }
+    res.setHeader('Cache-Control', 'public, max-age=600')
+    return res.redirect(302, target)
   }
 
   // 2) Резерв для старых пакетов: адрес по blobBase из метаданных в БД.
@@ -1305,21 +1345,9 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
   let upstream = await fetch(url)
   if (!upstream.ok) {
     // Blob может быть приватным (у новых store приватный доступ по умолчанию) —
-    // тогда подписываем GET сами. Область токена '*' — из-за бага SDK с
-    // декодированием кириллических путей (см. getSignedToken выше).
+    // тогда подписываем GET сами.
     try {
-      const token = await issueSignedToken({
-        pathname: '*',
-        operations: ['get'],
-        validUntil: Date.now() + 5 * 60_000,
-        token: blobReadWriteToken(),
-      })
-      const { presignedUrl } = await presignUrl(token, {
-        operation: 'get',
-        pathname,
-        access: 'private',
-      })
-      upstream = await fetch(presignedUrl)
+      upstream = await fetch(await presignScormGet(pathname))
     } catch (err) {
       console.error(`[scorm] не удалось подписать GET для «${pathname}»:`, err)
     }
