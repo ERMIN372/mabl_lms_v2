@@ -1333,8 +1333,14 @@ async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
         getSignedToken: async (pathname, clientPayload) => {
           assertAllowed(pathname, clientPayload)
           const token = await issueSignedToken({
-            pathname,
+            // Область токена — '*', а не конкретный путь: SDK декодирует
+            // delegation-токен через atob (latin-1), и у путей с кириллицей
+            // (id пакетов из русских названий) проверка области ломается на
+            // мусорных байтах. Право на конкретный путь уже проверено выше
+            // в assertAllowed, а сам токен короткоживущий.
+            pathname: '*',
             operations: ['put'],
+            validUntil: Date.now() + 15 * 60_000,
             token: blobReadWriteToken(),
           })
           return { token, urlOptions: { addRandomSuffix: false, allowOverwrite: true } }
