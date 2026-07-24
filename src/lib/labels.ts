@@ -1,7 +1,7 @@
 import type { AdminUserStatus, CourseFormat, NotificationKind, OrderStatus } from '@/types'
 
 export const courseFormatLabel: Record<CourseFormat, string> = {
-  scorm: 'SCORM',
+  scorm: 'Тренинг',
   video: 'Видео',
   longread: 'Лонгрид',
 }
