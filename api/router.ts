@@ -1204,20 +1204,49 @@ async function deleteScormPackage(id: string): Promise<void> {
   }
 }
 
+/**
+ * Страница ошибки раздачи SCORM. Показывается внутри iframe плеера, поэтому
+ * вместо голой строки отдаём аккуратную вёрстку: слушателю — общее сообщение,
+ * администратору — подсказку, как починить (перезагрузить пакет через админку).
+ */
+function scormErrorPage(res: VercelResponse, hint: string) {
+  res.setHeader('Content-Type', 'text/html;charset=utf-8')
+  return res.status(404).send(
+    `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Материалы недоступны</title></head>
+<body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f4f0;font-family:Georgia,serif;color:#1d232a">
+<div style="max-width:32rem;padding:2rem;text-align:center">
+<p style="font-size:1.4rem;margin:0 0 .75rem">Материалы курса временно недоступны</p>
+<p style="font-size:.95rem;color:#5a616a;margin:0">${hint}</p>
+</div></body></html>`,
+  )
+}
+
 /** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
 async function serveScormFile(id: string, rel: string, res: VercelResponse) {
-  if (!id || !rel) return res.status(404).send('SCORM-ресурс не найден')
+  if (!id || !rel) return scormErrorPage(res, 'Неверная ссылка на материалы. Обратитесь к администратору академии.')
   let base = scormBaseCache.get(id)
   if (!base) {
     const meta = await contentGet<ScormPackageMeta>('scorm', id)
     base = meta?.blobBase
     if (base) scormBaseCache.set(id, base)
   }
-  if (!base) return res.status(404).send('SCORM-пакет не найден')
+  if (!base) {
+    console.error(`[scorm] пакет «${id}» не найден в БД (файлы не загружены на сервер)`)
+    return scormErrorPage(
+      res,
+      'Пакет не найден в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели.',
+    )
+  }
 
   const encoded = rel.split('/').map(encodeURIComponent).join('/')
   const upstream = await fetch(`${base}/scorm/${id}/${encoded}`)
-  if (!upstream.ok) return res.status(404).send('SCORM-ресурс не найден')
+  if (!upstream.ok) {
+    console.error(`[scorm] файл «${rel}» пакета «${id}» отсутствует в Blob (HTTP ${upstream.status})`)
+    return scormErrorPage(
+      res,
+      'Файлы пакета отсутствуют в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели — курсы, использующие пакет, восстановятся автоматически.',
+    )
+  }
 
   const buf = Buffer.from(await upstream.arrayBuffer())
   res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))

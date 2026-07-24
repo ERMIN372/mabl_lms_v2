@@ -131,8 +131,16 @@ export const scormStore = {
   /**
    * Распаковать zip в браузере, залить файлы в Vercel Blob и сохранить
    * метаданные пакета в БД. Возвращает метаданные пакета.
+   *
+   * Если пакет с таким же id уже существует, confirmReplace решает, заменить ли
+   * его файлы (курсы со ссылкой на пакет продолжат работать с новой версией)
+   * или сохранить рядом как новый пакет с суффиксом в id.
    */
-  async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
+  async upload(
+    file: File,
+    onProgress?: UploadProgress,
+    confirmReplace?: (id: string) => boolean,
+  ): Promise<ScormPackage> {
     // JSZip подгружается отдельным чанком только при загрузке пакета.
     const { default: JSZip } = await import('jszip')
     const zip = await JSZip.loadAsync(file)
@@ -154,10 +162,11 @@ export const scormStore = {
       throw new Error('В манифесте не найдена точка входа (resource href).')
     }
 
-    // id должен быть уникальным среди уже загруженных пакетов (пути в Blob).
+    // id должен быть уникальным среди уже загруженных пакетов (пути в Blob),
+    // кроме случая осознанной замены существующего пакета его новой версией.
     const existing = new Set((await scormStore.list()).map((p) => p.id))
     let id = slugify(title ?? file.name.replace(/\.zip$/i, ''))
-    if (existing.has(id)) id = `${id}-${Date.now().toString(36)}`
+    if (existing.has(id) && !confirmReplace?.(id)) id = `${id}-${Date.now().toString(36)}`
 
     const entries = Object.values(zip.files).filter(
       (f) => !f.dir && f.name.startsWith(manifestDir),
