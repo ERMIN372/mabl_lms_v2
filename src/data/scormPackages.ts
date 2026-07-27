@@ -24,10 +24,28 @@ export interface RepoScormPackage {
 
 export const repoScormPackages: RepoScormPackage[] = [
   {
+    id: 'kognitivistika-i-razvitie-myshleniya',
+    title: 'Когнитивистика и развитие мышления',
+    launch: 'res/index.html',
+    fileCount: 64,
+  },
+  {
+    id: 'protein-golubaya-spirulina',
+    title: 'Протеиновый коктейль «Голубая спирулина»',
+    launch: 'res/index.html',
+    fileCount: 50,
+  },
+  {
+    id: 'smuzi-myagkaya-energiya',
+    title: 'Смузи «Мягкая энергия»',
+    launch: 'res/index.html',
+    fileCount: 50,
+  },
+  {
     id: 'manager-intro',
     title: 'Эспрессо-тоник тропики',
     launch: 'res/index.html',
-    fileCount: 48,
+    fileCount: 51,
   },
 ]
 
