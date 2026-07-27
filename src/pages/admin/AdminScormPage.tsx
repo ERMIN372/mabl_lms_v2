@@ -6,6 +6,7 @@ import { ArrowUpRight, Clipboard } from '@/components/ui/Icon'
 import { AdminPageHeader } from '@/components/admin/AdminUI'
 import { api } from '@/api'
 import type { ScormPackage, ScormDiagnostics } from '@/api'
+import { repoScormPackages, repoScormLaunchUrl } from '@/data/scormPackages'
 import { useCourses } from '@/context/CoursesContext'
 import { formatDateTime } from '@/lib/utils'
 import type { Course } from '@/types'
@@ -61,10 +62,6 @@ export default function AdminScormPage() {
   const navigate = useNavigate()
   const { addCourse } = useCourses()
   const [packages, setPackages] = useState<ScormPackage[]>([])
-  // Доступность пакета в серверном хранилище: id → доступен ли launch-файл.
-  // Ловит пакеты, оставшиеся только в кэше браузера загрузившего (старый формат):
-  // у админа такой пакет открывался, а у остальных пользователей — нет.
-  const [available, setAvailable] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [creatingId, setCreatingId] = useState<string | null>(null)
@@ -79,20 +76,11 @@ export default function AdminScormPage() {
       : 'Загрузка…'
     : '+ Загрузить SCORM (.zip)'
 
+  // Доступность файлов пакета не проверяем автоматически на каждой загрузке
+  // страницы — это лишние обращения к раздаче. Для проверки есть кнопка
+  // «Диагностика» у каждого пакета.
   const refresh = async () => {
-    const list = await api.scorm.list()
-    setPackages(list)
-    const checks = await Promise.all(
-      list.map(async (pkg) => {
-        try {
-          const resp = await fetch(pkg.launchUrl, { cache: 'no-store' })
-          return [pkg.id, resp.ok] as const
-        } catch {
-          return [pkg.id, false] as const
-        }
-      }),
-    )
-    setAvailable(Object.fromEntries(checks))
+    setPackages(await api.scorm.list())
   }
 
   useEffect(() => {
@@ -126,7 +114,7 @@ export default function AdminScormPage() {
     }
   }
 
-  const onCreateCourse = async (pkg: ScormPackage) => {
+  const onCreateCourse = async (pkg: { id: string; title: string; launchUrl: string }) => {
     if (creatingId) return
     setError('')
     setCreatingId(pkg.id)
@@ -198,7 +186,7 @@ export default function AdminScormPage() {
     <div>
       <AdminPageHeader
         title="SCORM-пакеты"
-        description="Загрузите .zip с SCORM-пакетом (1.2). Пакет распаковывается и становится доступен для подключения к программе."
+        description="Пакеты из репозитория раздаются напрямую и не расходуют лимиты хранилища. Загрузка .zip через админку кладёт пакет в облачное хранилище — удобно, но расходует лимиты плана."
         actions={
           <>
             <input
@@ -221,6 +209,61 @@ export default function AdminScormPage() {
         </div>
       )}
 
+      {/* Пакеты, лежащие в репозитории: раздаются статикой, без хранилища и
+          лимитов операций — основной способ публикации на бесплатном плане. */}
+      {repoScormPackages.length > 0 && (
+        <section className="mt-8">
+          <h2 className="font-serif text-xl text-neft">Пакеты в репозитории</h2>
+          <p className="mt-1 text-sm text-ink-60">
+            Раздаются напрямую, без облачного хранилища: не расходуют лимиты и не могут быть
+            приостановлены. Чтобы добавить новый — передайте .zip разработчику, он положит пакет
+            в репозиторий.
+          </p>
+          <div className="mt-4 overflow-hidden rounded-card border border-ink-10">
+            <ul className="divide-y divide-ink-10">
+              {repoScormPackages.map((pkg) => {
+                const launchUrl = repoScormLaunchUrl(pkg)
+                return (
+                  <li
+                    key={pkg.id}
+                    className="grid grid-cols-1 gap-3 px-5 py-4 md:grid-cols-12 md:items-center md:gap-4"
+                  >
+                    <div className="min-w-0 md:col-span-8">
+                      <p className="truncate font-serif text-lg text-neft">{pkg.title}</p>
+                      <p className="text-[0.74rem] text-ink-60">
+                        {pkg.fileCount} файлов · {launchUrl}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1 md:col-span-4 md:flex-nowrap md:justify-end">
+                      <a
+                        href={launchUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-token px-3 py-2 text-[0.7rem] font-semibold uppercase tracking-wide text-ink-60 hover:bg-ink-5 hover:text-neft"
+                      >
+                        Открыть <ArrowUpRight width={14} height={14} />
+                      </a>
+                      <Button
+                        onClick={() => onCreateCourse({ id: pkg.id, title: pkg.title, launchUrl })}
+                        variant="ghost"
+                        size="sm"
+                        disabled={creatingId !== null}
+                      >
+                        {creatingId === pkg.id ? 'Создаём…' : 'Создать курс'}
+                      </Button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        </section>
+      )}
+
+      {packages.length > 0 && (
+        <h2 className="mt-10 font-serif text-xl text-neft">Загруженные через админку</h2>
+      )}
+
       {packages.length > 0 ? (
         <div className="mt-8 overflow-hidden rounded-card border border-ink-10">
           <div className="hidden grid-cols-12 gap-4 border-b border-ink-10 bg-ink-5 px-5 py-3 text-[0.68rem] uppercase tracking-wide text-ink-60 md:grid">
@@ -237,12 +280,6 @@ export default function AdminScormPage() {
                 <div className="min-w-0 md:col-span-5">
                   <p className="truncate font-serif text-lg text-neft">{pkg.title}</p>
                   <p className="text-[0.74rem] text-ink-60">{pkg.fileCount} файлов</p>
-                  {available[pkg.id] === false && (
-                    <p className="mt-1 text-[0.74rem] font-semibold text-ocean">
-                      Недоступен в серверном хранилище — у слушателей курс не открывается.
-                      Загрузите этот пакет заново (файлы заменятся, курсы восстановятся).
-                    </p>
-                  )}
                 </div>
                 <div className="text-sm text-ink-60 md:col-span-3">{formatDateTime(pkg.uploadedAt)}</div>
                 <div className="flex flex-wrap gap-1 md:col-span-4 md:flex-nowrap md:justify-end">

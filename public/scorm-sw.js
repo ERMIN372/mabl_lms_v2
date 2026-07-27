@@ -1,37 +1,36 @@
 /*
- * Service Worker для SCORM-пакетов, загруженных через админку.
+ * Саморазрушающийся service worker.
  *
- * Файлы пакетов хранятся на сервере (Vercel Blob) и отдаются приложением
- * по /scorm-store/<id>/<путь> (прокси в api/router.ts).
- *
- * Порядок «сначала сеть, потом кэш» принципиален: раньше кэш проверялся первым,
- * и у администратора, загружавшего пакет в старом формате (Cache Storage),
- * курс открывался из локальной копии, хотя на сервере файлов не было — у всех
- * остальных пользователей пакет не работал, а админ этого не видел. Теперь все
- * видят одно и то же (серверную раздачу), а старый локальный кэш остаётся
- * только резервом на случай недоступности сети.
+ * Раньше здесь жил воркер, который проигрывал SCORM-пакеты из Cache Storage.
+ * Теперь пакеты хранятся на сервере, а перехват /scorm-store/ этим воркером
+ * ломал раздачу крупных файлов (он не умеет отдавать странице ответы-редиректы,
+ * которыми отдаются файлы больше 4,5 МБ). Поэтому воркер снимает сам себя,
+ * чистит свой кэш и перестаёт вмешиваться в запросы. Файл оставлен (а не удалён),
+ * чтобы браузеры с уже установленным старым воркером получили это обновление и
+ * разрегистрировались.
  */
 
-const CACHE = 'scorm-packages'
-
-self.addEventListener('install', () => {
-  self.skipWaiting()
-})
+self.addEventListener('install', () => self.skipWaiting())
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim())
+  event.waitUntil(
+    (async () => {
+      try {
+        await caches.delete('scorm-packages')
+      } catch {
+        /* нет доступа к кэшу — не критично */
+      }
+      try {
+        await self.registration.unregister()
+        // Перезагружаем открытые вкладки, чтобы запросы пошли напрямую в сеть,
+        // минуя только что снятый воркер.
+        const clients = await self.clients.matchAll({ type: 'window' })
+        for (const client of clients) client.navigate(client.url)
+      } catch {
+        /* среда без прав на unregister/navigate — не критично */
+      }
+    })(),
+  )
 })
 
-self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url)
-  if (url.origin === self.location.origin && url.pathname.startsWith('/scorm-store/')) {
-    const fromCache = () =>
-      caches.open(CACHE).then((cache) => cache.match(event.request, { ignoreSearch: true }))
-    event.respondWith(
-      fetch(event.request).then(
-        (response) => (response.ok ? response : fromCache().then((hit) => hit || response)),
-        () => fromCache().then((hit) => hit || new Response('Нет соединения', { status: 503 })),
-      ),
-    )
-  }
-})
+// Никаких fetch-обработчиков: запросы идут в сеть напрямую.

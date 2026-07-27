@@ -25,6 +25,14 @@ const BASE = '/scorm-store'
  */
 const MULTIPART_THRESHOLD = 4 * 1024 * 1024
 
+/** Каноничный адрес файла в хранилище и его размер (для выбора способа раздачи). */
+export interface ScormFileRef {
+  /** URL файла в Blob. */
+  u: string
+  /** Размер в байтах. */
+  s: number
+}
+
 export interface ScormPackage {
   id: string
   title: string
@@ -36,6 +44,12 @@ export interface ScormPackage {
   uploadedAt: string
   /** Origin хранилища Blob (для прокси). Проставляется при загрузке. */
   blobBase?: string
+  /**
+   * Карта «путь внутри пакета → адрес и размер файла в Blob». Сохраняется при
+   * загрузке, чтобы раздача брала адреса из БД и НЕ вызывала list() на каждый
+   * запрос (list — «advanced operation» Vercel Blob со строгим лимитом).
+   */
+  files?: Record<string, ScormFileRef>
 }
 
 const MIME: Record<string, string> = {
@@ -237,8 +251,21 @@ export const scormStore = {
       )
     }
     if (pre.mode === 'presigned' && pre.presignError) {
+      const raw = pre.presignError
+      // «Suspended» — это не проблема кода/настроек, а приостановка самого
+      // хранилища на стороне Vercel (обычно превышены лимиты бесплатного плана
+      // Hobby или биллинг). Ни загрузка, ни раздача файлов при этом не работают.
+      if (/suspend/i.test(raw)) {
+        throw new Error(
+          'Хранилище Vercel Blob приостановлено (suspended) на стороне Vercel — ' +
+            'пока оно в этом состоянии, не работают ни загрузка, ни отдача уже загруженных файлов. ' +
+            'Обычно причина — превышены лимиты бесплатного плана Hobby (операции/трафик) или вопрос с биллингом. ' +
+            'Что делать: Vercel → Storage → ваш Blob-store — проверьте статус и использование; ' +
+            'снимите приостановку (upgrade плана до Pro либо дождитесь сброса лимитов в новом цикле).',
+        )
+      }
       throw new Error(
-        `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${pre.presignError}` +
+        `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${raw}` +
           ' Обычно это выключенный OIDC у проекта: Vercel → Project Settings → Security →' +
           ' Secure Backend Access (OIDC) → Enabled, затем Redeploy Production.',
       )
@@ -253,6 +280,7 @@ export const scormStore = {
     const putFile = pre.mode === 'presigned' ? uploadPresigned : upload
 
     let blobBase = ''
+    const files: Record<string, ScormFileRef> = {}
     try {
       await runPool(
         entries,
@@ -271,6 +299,9 @@ export const scormStore = {
             multipart: blob.size > MULTIPART_THRESHOLD,
           })
           if (!blobBase) blobBase = new URL(result.url).origin
+          // Запоминаем каноничный адрес и размер файла — раздача возьмёт их из
+          // метаданных, не вызывая list() (экономим advanced-операции Blob).
+          files[rel] = { u: result.url, s: blob.size }
         },
         onProgress,
       )
@@ -284,6 +315,7 @@ export const scormStore = {
       launch,
       launchUrl: `${BASE}/${id}/${launch}`,
       fileCount: entries.length,
+      files,
       uploadedAt: new Date().toISOString(),
       blobBase,
     }

@@ -1,0 +1,28 @@
+<svg width="72" height="72" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="72" height="72" fill="#D7D8DB"/>
+    <circle cx="8" cy="8" r="1" fill="white"/>
+    <circle cx="8" cy="22" r="1" fill="white"/>
+    <circle cx="8" cy="36" r="1" fill="white"/>
+    <circle cx="8" cy="50" r="1" fill="white"/>
+    <circle cx="8" cy="64" r="1" fill="white"/>
+    <circle cx="22" cy="8" r="1" fill="white"/>
+    <circle cx="22" cy="22" r="1" fill="white"/>
+    <circle cx="22" cy="36" r="1" fill="white"/>
+    <circle cx="22" cy="50" r="1" fill="white"/>
+    <circle cx="22" cy="64" r="1" fill="white"/>
+    <circle cx="36" cy="8" r="1" fill="white"/>
+    <circle cx="36" cy="22" r="1" fill="white"/>
+    <circle cx="36" cy="36" r="1" fill="white"/>
+    <circle cx="36" cy="50" r="1" fill="white"/>
+    <circle cx="36" cy="64" r="1" fill="white"/>
+    <circle cx="50" cy="8" r="1" fill="white"/>
+    <circle cx="50" cy="22" r="1" fill="white"/>
+    <circle cx="50" cy="36" r="1" fill="white"/>
+    <circle cx="50" cy="50" r="1" fill="white"/>
+    <circle cx="50" cy="64" r="1" fill="white"/>
+    <circle cx="64" cy="8" r="1" fill="white"/>
+    <circle cx="64" cy="22" r="1" fill="white"/>
+    <circle cx="64" cy="36" r="1" fill="white"/>
+    <circle cx="64" cy="50" r="1" fill="white"/>
+    <circle cx="64" cy="64" r="1" fill="white"/>
+</svg>

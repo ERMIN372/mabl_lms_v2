@@ -1171,6 +1171,12 @@ interface ScormPackageMeta {
   uploadedAt: string
   /** Origin хранилища Blob, например https://xxxx.public.blob.vercel-storage.com */
   blobBase?: string
+  /**
+   * Карта «путь внутри пакета → {u: URL, s: размер}». Проставляется при загрузке,
+   * чтобы раздача брала адреса отсюда и не вызывала list() (advanced-операция
+   * Vercel Blob со строгим лимитом на бесплатном плане).
+   */
+  files?: Record<string, { u: string; s: number }>
 }
 
 const SCORM_MIME: Record<string, string> = {
@@ -1269,6 +1275,44 @@ interface ScormFileRef {
 }
 const scormFilesCache = new Map<string, Map<string, ScormFileRef>>()
 
+/**
+ * Карта файлов пакета. Сначала — из метаданных в БД (без единой Blob-операции),
+ * и только для старых пакетов без карты — разовый list() как резерв. list —
+ * «advanced operation» Vercel Blob со строгим месячным лимитом, поэтому в
+ * горячем пути раздачи его быть не должно.
+ */
+async function getScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
+  const cached = scormFilesCache.get(id)
+  if (cached) return cached
+
+  const meta = await contentGet<ScormPackageMeta>('scorm', id)
+  if (meta?.files && Object.keys(meta.files).length) {
+    const map = new Map<string, ScormFileRef>()
+    for (const [rel, ref] of Object.entries(meta.files)) {
+      map.set(`scorm/${id}/${rel}`, { url: ref.u, size: ref.s })
+    }
+    scormFilesCache.set(id, map)
+    return map
+  }
+
+  // Старый пакет без карты: разово перечисляем файлы и сохраняем карту в
+  // метаданные — чтобы дальше list() не вызывался (самоизлечение без перезаливки).
+  const map = await loadScormFileMap(id)
+  if (meta && map.size) {
+    try {
+      const files: Record<string, { u: string; s: number }> = {}
+      for (const [pathname, ref] of map) {
+        files[pathname.replace(`scorm/${id}/`, '')] = { u: ref.url, s: ref.size }
+      }
+      await saveScormPackage({ ...meta, files } as unknown as Record<string, unknown>)
+    } catch (err) {
+      console.error(`[scorm] не удалось сохранить карту файлов пакета «${id}»:`, err)
+    }
+  }
+  return map
+}
+
+/** Резервный источник карты — список файлов из хранилища (расходует advanced-операции). */
 async function loadScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
   const map = new Map<string, ScormFileRef>()
   let cursor: string | undefined
@@ -1321,7 +1365,7 @@ async function diagnoseScormPackage(id: string) {
 
   let files: Map<string, ScormFileRef>
   try {
-    files = await loadScormFileMap(id)
+    files = await getScormFileMap(id)
   } catch (err) {
     report.listError = err instanceof Error ? err.message : String(err)
     report.tookMs = Date.now() - started
@@ -1330,20 +1374,21 @@ async function diagnoseScormPackage(id: string) {
   report.fileCount = files.size
 
   const check = async (pathname: string, ref: ScormFileRef) => {
-    const big = ref.size > SCORM_PROXY_LIMIT
-    // Прямой публичный URL.
+    const via = ref.size > SCORM_PROXY_LIMIT ? 'redirect' : 'proxy'
+    // Проверяем доступ так же, как это делает браузер: GET с Range на 1 байт
+    // (для крупных файлов не тянем весь объём; HEAD публичные blob отклоняют).
+    const range = { headers: { Range: 'bytes=0-0' } }
     let status: number | string = 'no-url'
-    let via = big ? 'redirect' : 'proxy'
     try {
-      const head = await fetch(ref.url, { method: big ? 'HEAD' : 'GET' })
-      status = head.status
-      if (head.ok) return { ok: true, via: `${via}/public`, status }
+      const pub = await fetch(ref.url, range)
+      status = pub.status
+      if (pub.ok) return { ok: true, via: `${via}/public`, status }
     } catch (err) {
       status = err instanceof Error ? err.message : 'fetch-error'
     }
-    // Подписанный (для приватных blob).
+    // Резерв: подписанная ссылка (на случай приватного blob).
     try {
-      const signed = await fetch(await presignScormGet(pathname), { method: big ? 'HEAD' : 'GET' })
+      const signed = await fetch(await presignScormGet(pathname), range)
       status = signed.status
       if (signed.ok) return { ok: true, via: `${via}/signed`, status }
     } catch (err) {
@@ -1380,29 +1425,23 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
   if (!id || !rel) return scormErrorPage(res, 'Неверная ссылка на материалы. Обратитесь к администратору академии.')
   const pathname = `scorm/${id}/${rel}`
 
-  // 1) Канонический URL файла из списка хранилища.
+  // 1) Канонический URL файла из карты пакета (метаданные БД, без Blob-операций).
   let file: ScormFileRef | undefined
   try {
-    let files = scormFilesCache.get(id)
-    if (!files || !files.has(pathname)) files = await loadScormFileMap(id)
+    const files = await getScormFileMap(id)
     file = files.get(pathname)
   } catch (err) {
-    console.error(`[scorm] не удалось получить список файлов пакета «${id}»:`, err)
+    console.error(`[scorm] не удалось получить карту файлов пакета «${id}»:`, err)
   }
   let url = file?.url
 
   // Крупные файлы не пролезают в лимит ответа функции (4,5 МБ) — отдаём
-  // редиректом на само хранилище (для приватных blob — по подписанной ссылке).
+  // редиректом прямо на публичный URL из хранилища. HEAD-проверку не делаем:
+  // публичные blob Vercel отвечают на HEAD отказом, и это ошибочно уводило
+  // на приватную подписанную ссылку, которая для публичного файла даёт 403.
   if (file && file.size > SCORM_PROXY_LIMIT) {
-    let target = file.url
-    try {
-      const head = await fetch(file.url, { method: 'HEAD' })
-      if (!head.ok) target = await presignScormGet(pathname)
-    } catch (err) {
-      console.error(`[scorm] не удалось проверить доступ к «${pathname}»:`, err)
-    }
     res.setHeader('Cache-Control', 'public, max-age=600')
-    return res.redirect(302, target)
+    return res.redirect(302, file.url)
   }
 
   // 2) Резерв для старых пакетов: адрес по blobBase из метаданных в БД.
