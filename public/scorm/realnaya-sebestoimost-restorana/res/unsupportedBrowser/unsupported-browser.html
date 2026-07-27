@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="robots" content="noindex, nofollow"/>
+	<title>Page Not Available</title>
+	<link href="fonts/fonts.css" rel="stylesheet">
+	<style rel="stylesheet" type="text/css">
+
+		.container {
+			position: absolute;
+			visibility: hidden;
+			width: 400px;
+		}
+
+		.container_positioned {
+			visibility: visible;
+		}
+
+		.title {
+			font: 20px/28px 'Roboto';
+			text-align: center;
+			margin-bottom: 16px;
+		}
+
+		.description {
+			font: 16px/22px 'Roboto';
+			color: #6C737B;
+			margin-bottom: 24px;
+			text-align: center;
+		}
+
+		.browsers-list {
+			width: 100%;
+			position: relative;
+		}
+
+		.logo-container {
+			text-decoration: none;
+		}
+
+		.logo-container:hover {
+			cursor: pointer;
+			text-decoration: underline;
+		}
+
+		.logo-container {
+			position: absolute;
+			top: 0;
+		}
+
+		.last-logo {
+			margin-right: 0;
+		}
+
+		.logo {
+			position: absolute;
+			border: none;
+		}
+
+		.name {
+			font: 16px/22px 'Roboto';
+			color: #295DE0;
+			text-decoration: none;
+			margin-left: 28px;
+		}
+		.chrome {
+			left: 16px;
+			width: 85px;
+		}
+		.edge {
+			left: 125px;
+			width: 64px;
+		}
+		.firefox {
+			left: 213px;
+			width: 77px;
+		}
+		.safari {
+			left: 314px;
+			width: 70px;
+		}
+	</style>
+</head>
+<body>
+<div id="container" class="container container_positioned">
+	<div class="title">This browser is not supported</div>
+	<div class="description">To view this content, please use one of these browsers:</div>
+	<div class="browsers-list">
+		<a class="logo-container chrome" href="https://www.google.com/chrome" target="_blank">
+			<img src="unsupportedBrowserImages/Chrome.png" class="logo" alt="Chrome"/>
+			<span class="name">Chrome</span>
+		</a>
+		<a class="logo-container edge" href="https://www.microsoft.com/edge" target="_blank">
+			<img src="unsupportedBrowserImages/Edge.png" class="logo" alt="Edge"/>
+			<span class="name">Edge</span>
+		</a>
+		<a class="logo-container firefox" href="https://www.mozilla.org/firefox" target="_blank">
+			<img src="unsupportedBrowserImages/Firefox.png" class="logo" alt="Firefox"/>
+			<span class="name">Firefox</span>
+		</a>
+		<a class="last-logo logo-container safari" href="https://www.apple.com/safari/" target="_blank">
+			<img src="unsupportedBrowserImages/Safari.png" class="logo" alt="Safari"/>
+			<span class="name">Safari</span>
+		</a>
+	</div>
+</div>
+<script type="text/javascript">
+	function alignContent() {
+		var bodyWidth = window.innerWidth || document.body.offsetWidth
+		var bodyHeight = window.innerHeight || document.body.offsetHeight || document.documentElement.clientHeight
+		var element = document.getElementById("container")
+		var elementLeft = (bodyWidth - element.offsetWidth) * 0.5
+		var elementTop = (bodyHeight - element.offsetHeight) * 0.5
+		element.style.left = elementLeft + 'px'
+		element.style.top = elementTop + 'px'
+	}
+
+	window.onload = function () {
+		setInterval(alignContent, 100)
+		alignContent()
+	}
+</script>
+</body>
+</html>
