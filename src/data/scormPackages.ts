@@ -24,6 +24,14 @@ export interface RepoScormPackage {
 
 export const repoScormPackages: RepoScormPackage[] = [
   {
+    // Файлы пакета загружаются в репозиторий отдельно (архив слишком велик для
+    // передачи через чат) — до этого момента ссылки пакета будут отдавать 404.
+    id: 'realnaya-sebestoimost-restorana',
+    title: 'Реальная себестоимость и операционные издержки ресторана',
+    launch: 'res/index.html',
+    fileCount: 77,
+  },
+  {
     id: 'kognitivistika-i-razvitie-myshleniya',
     title: 'Когнитивистика и развитие мышления',
     launch: 'res/index.html',
