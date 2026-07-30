@@ -98,7 +98,7 @@ export default function ForumTopicPage() {
             ))}
           </div>
 
-          {/* Форма ответа (mock) */}
+          {/* Форма ответа */}
           <form onSubmit={submit} className="mt-8 rounded-card border border-ink-10 p-6">
             <p className="eyebrow mb-4">Оставить ответ</p>
             <Textarea

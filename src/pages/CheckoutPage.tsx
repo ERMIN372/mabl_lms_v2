@@ -20,33 +20,23 @@ export default function CheckoutPage() {
   const returnOrderId = params.get('order') || ''
   const { getCourseById } = useCourses()
   const course = getCourseById(courseId)
-  const { purchaseCourse, isOwned, grantCourseAccess, paymentProvider } = usePurchases()
-  const { user } = useAuth()
-
-  const isRedirectProvider = paymentProvider.name === 'ЮKassa'
+  const { canAccessCourse, refreshAccess } = usePurchases()
+  const { user, isAuthenticated } = useAuth()
 
   const [email, setEmail] = useState(user?.email || '')
-  const [name, setName] = useState(user?.name || '')
-  const [card, setCard] = useState('')
   const [processing, setProcessing] = useState(false)
-  const [done, setDone] = useState(false)
-  const [txId, setTxId] = useState('')
   const [error, setError] = useState('')
   // Состояние возврата с платёжной формы ЮKassa.
   const [returnState, setReturnState] = useState<'idle' | 'checking' | 'pending' | 'done'>(
     returnOrderId ? 'checking' : 'idle',
   )
 
-  const alreadyOwned = useMemo(() => (course ? isOwned(course.id) : false), [course, isOwned])
-  const isFreeCourse = !!course && course.price === 0
+  const alreadyOwned = useMemo(() => (course ? canAccessCourse(course) : false), [course, canAccessCourse])
 
-  // Бесплатные курсы не требуют оплаты — сразу открываем доступ.
+  // E-mail подставляем из профиля, как только сессия восстановлена.
   useEffect(() => {
-    if (course && isFreeCourse && !alreadyOwned) {
-      grantCourseAccess(course.id)
-      setDone(true)
-    }
-  }, [course, isFreeCourse, alreadyOwned, grantCourseAccess])
+    if (user?.email) setEmail((prev) => prev || user.email)
+  }, [user?.email])
 
   // Возврат с ЮKassa: подтверждаем оплату по номеру заказа.
   useEffect(() => {
@@ -55,13 +45,11 @@ export default function CheckoutPage() {
     setReturnState('checking')
     api.payments
       .statusByOrder(returnOrderId)
-      .then((res) => {
+      .then(async (res) => {
         if (!active) return
         if (res.paid) {
-          if (res.courseId) grantCourseAccess(res.courseId)
-          else if (course) grantCourseAccess(course.id)
-          setReturnState('done')
-          setDone(true)
+          await refreshAccess()
+          if (active) setReturnState('done')
         } else {
           setReturnState('pending')
         }
@@ -70,7 +58,7 @@ export default function CheckoutPage() {
     return () => {
       active = false
     }
-  }, [returnOrderId, course, grantCourseAccess])
+  }, [returnOrderId, refreshAccess])
 
   if (!course) {
     return (
@@ -87,28 +75,46 @@ export default function CheckoutPage() {
     setError('')
     setProcessing(true)
     try {
-      const result = await purchaseCourse({
+      const result = await api.payments.pay({
         itemId: course.id,
         itemTitle: course.title,
         amount: course.price,
         currency: 'RUB',
         customerEmail: email,
-        customerId: user?.id,
       })
-      if (result.status === 'succeeded') {
-        setTxId(result.transactionId)
-        setDone(true)
-      } else if (result.status === 'redirect') {
-        // Браузер уходит на платёжную форму ЮKassa — оставляем индикатор.
-        return
-      } else {
-        setError(result.message)
-      }
+      // При успехе браузер уходит на платёжную форму ЮKassa.
+      if (result.status !== 'redirect') setError(result.message)
     } catch {
-      setError('Не удалось провести оплату. Попробуйте ещё раз.')
+      setError('Не удалось перейти к оплате. Попробуйте ещё раз.')
     } finally {
       setProcessing(false)
     }
+  }
+
+  // Оплатить программу может только авторизованный слушатель: доступ
+  // привязывается к аккаунту, а не к браузеру.
+  if (!isAuthenticated) {
+    return (
+      <Container className="py-20 md:py-28">
+        <div className="mx-auto max-w-lg rounded-card border border-ink-10 bg-wisdom p-10 text-center">
+          <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-oceanc-10 text-ocean">
+            <Lock width={28} height={28} />
+          </span>
+          <h1 className="mt-6 font-serif text-3xl text-neft">Войдите в личный кабинет</h1>
+          <p className="mt-3 text-ink-60">
+            Доступ к программе «{displayTitle(course.title)}» открывается в вашем личном кабинете,
+            поэтому оплата возможна только после входа. Если аккаунта ещё нет — зарегистрируйтесь,
+            это займёт минуту.
+          </p>
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
+            <Button to="/login" state={{ from: `/checkout?course=${course.id}` }}>
+              Войти или зарегистрироваться
+            </Button>
+            <Button to={`/courses/${course.id}`} variant="secondary">К описанию программы</Button>
+          </div>
+        </div>
+      </Container>
+    )
   }
 
   // Экран возврата с ЮKassa, пока статус оплаты не подтверждён.
@@ -136,7 +142,7 @@ export default function CheckoutPage() {
   }
 
   // Экран успеха
-  if (done || alreadyOwned) {
+  if (returnState === 'done' || alreadyOwned) {
     return (
       <Container className="py-20 md:py-28">
         <div className="mx-auto max-w-lg rounded-card border border-ink-10 bg-wisdom p-10 text-center">
@@ -147,11 +153,6 @@ export default function CheckoutPage() {
           <p className="mt-3 text-ink-60">
             Курс «{displayTitle(course.title)}» добавлен в ваш личный кабинет. Можно приступать к обучению.
           </p>
-          {txId && (
-            <p className="mt-4 text-[0.72rem] uppercase tracking-wide text-ink-40">
-              Транзакция: {txId}
-            </p>
-          )}
           <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
             <Button to={`/courses/${course.id}`}>Перейти к курсу</Button>
             <Button to="/dashboard" variant="secondary">
@@ -173,30 +174,20 @@ export default function CheckoutPage() {
           <p className="eyebrow mb-3">Оформление доступа</p>
           <h1 className="font-serif text-3xl text-neft">Оплата курса</h1>
           <p className="mt-3 max-w-md text-ink-60">
-            {isRedirectProvider
-              ? 'Оплата проходит на защищённой странице ЮKassa. После подтверждения доступ к программе откроется автоматически.'
-              : `Демо-режим оплаты. Реальные платежи подключаются через провайдера (${paymentProvider.name} → ЮKassa) без изменения интерфейса.`}
+            Оплата проходит на защищённой странице ЮKassa. После подтверждения платежа доступ
+            к программе откроется в вашем личном кабинете автоматически.
           </p>
 
           <form onSubmit={submit} className="mt-8 space-y-5">
-            <Input label="Имя и фамилия" value={name} onChange={(e) => setName(e.target.value)} required placeholder="Александр Орлов" />
-            <Input label="E-mail для доступа" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="you@company.com" />
-            {!isRedirectProvider && (
-              <>
-                <Input
-                  label="Номер карты"
-                  value={card}
-                  onChange={(e) => setCard(e.target.value)}
-                  placeholder="0000 0000 0000 0000"
-                  hint="Демо-поле: данные не передаются и не сохраняются."
-                  inputMode="numeric"
-                />
-                <div className="grid grid-cols-2 gap-4">
-                  <Input label="Срок" placeholder="ММ / ГГ" />
-                  <Input label="CVC" placeholder="•••" />
-                </div>
-              </>
-            )}
+            <Input
+              label="E-mail для чека и доступа"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              placeholder="you@company.com"
+              hint="На этот адрес ЮKassa отправит кассовый чек."
+            />
 
             {error && (
               <div className="rounded-token border border-ocean/40 bg-oceanc-10 px-4 py-3 text-sm text-ocean">
@@ -206,16 +197,10 @@ export default function CheckoutPage() {
 
             <Button type="submit" size="lg" fullWidth disabled={processing}>
               <Lock width={16} height={16} />
-              {processing
-                ? isRedirectProvider
-                  ? 'Переходим к оплате…'
-                  : 'Проводим оплату…'
-                : isRedirectProvider
-                  ? `Перейти к оплате · ${formatPrice(course.price)}`
-                  : `Оплатить ${formatPrice(course.price)}`}
+              {processing ? 'Переходим к оплате…' : `Перейти к оплате · ${formatPrice(course.price)}`}
             </Button>
             <p className="text-center text-[0.72rem] text-ink-40">
-              Нажимая «Оплатить», вы принимаете <Link to="/offer" className="underline hover:text-ink-80">публичную оферту</Link>, <Link to="/privacy" className="underline hover:text-ink-80">политику конфиденциальности</Link> и даёте <Link to="/consent-personal-data" className="underline hover:text-ink-80">согласие на обработку персональных данных</Link> МАБЛ.
+              Нажимая «Перейти к оплате», вы принимаете <Link to="/offer" className="underline hover:text-ink-80">публичную оферту</Link>, <Link to="/privacy" className="underline hover:text-ink-80">политику конфиденциальности</Link> и даёте <Link to="/consent-personal-data" className="underline hover:text-ink-80">согласие на обработку персональных данных</Link> МАБЛ.
             </p>
           </form>
         </div>

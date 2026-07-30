@@ -11,15 +11,8 @@ import { useCourses } from '@/context/CoursesContext'
 import { usePurchases } from '@/context/PurchaseContext'
 import { formatDate, formatDateTime, formatPrice } from '@/lib/utils'
 
-const stats = [
-  { value: '6', label: 'Флагманских программ' },
-  { value: '120+', label: 'Часов практики' },
-  { value: '15', label: 'Преподавателей' },
-  { value: '2 400', label: 'Слушателей' },
-]
-
 export default function HomePage() {
-  const { isOwned } = usePurchases()
+  const { canAccessCourse } = usePurchases()
   const { courses } = useCourses()
   const { data: webinar } = useAsync(() => api.events.next(), [])
   const { data: newsData } = useAsync(() => api.news.list(), [])
@@ -56,20 +49,6 @@ export default function HomePage() {
             <div className="flex justify-center lg:justify-end">
               <Crest withBanner className="h-60 w-60 md:h-80 md:w-80" />
             </div>
-          </div>
-        </Container>
-      </section>
-
-      {/* STATS */}
-      <section className="border-b border-ink-10">
-        <Container>
-          <div className="grid grid-cols-2 divide-x divide-ink-10 md:grid-cols-4">
-            {stats.map((s) => (
-              <div key={s.label} className="px-2 py-10 text-center">
-                <p className="font-serif text-4xl font-light text-neft">{s.value}</p>
-                <p className="mt-2 text-[0.72rem] uppercase tracking-wide text-ink-60">{s.label}</p>
-              </div>
-            ))}
           </div>
         </Container>
       </section>
@@ -117,6 +96,7 @@ export default function HomePage() {
       )}
 
       {/* COURSES */}
+      {featured.length > 0 && (
       <section className="border-t border-ink-10 bg-ink-5 py-20 md:py-24">
         <Container>
           <div className="flex items-end justify-between gap-6">
@@ -127,13 +107,15 @@ export default function HomePage() {
           </div>
           <div className="mt-12 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {featured.map((course) => (
-              <CourseCard key={course.id} course={course} owned={isOwned(course.id)} />
+              <CourseCard key={course.id} course={course} owned={canAccessCourse(course)} />
             ))}
           </div>
         </Container>
       </section>
+      )}
 
       {/* NEWS */}
+      {latestNews.length > 0 && (
       <section className="py-20 md:py-24">
         <Container>
           <div className="flex items-end justify-between gap-6">
@@ -154,6 +136,7 @@ export default function HomePage() {
           </div>
         </Container>
       </section>
+      )}
 
       {/* CTA */}
       <section className="border-t border-ink-10 bg-ocean text-wisdom">

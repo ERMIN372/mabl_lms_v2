@@ -5,8 +5,7 @@ import { api } from '@/api'
 
 /**
  * Каталог программ — источник истины для всего приложения (каталог, главная,
- * кабинет, админка). Все операции идут через слой данных `api.courses`,
- * поэтому переход с mock на реальный бэкенд не затрагивает компоненты.
+ * кабинет, админка). Все операции идут через слой данных `api.courses`.
  *
  * Для мгновенной отрисовки состояние инициализируется синхронным снимком
  * (`peek`), а затем синхронизируется асинхронным `list()`.
@@ -19,7 +18,6 @@ interface CoursesContextValue {
   addCourse: (course: Course) => Promise<string>
   updateCourse: (id: string, patch: Partial<Course>) => Promise<void>
   deleteCourse: (id: string) => Promise<void>
-  resetCourses: () => Promise<void>
 }
 
 const CoursesContext = createContext<CoursesContextValue | null>(null)
@@ -61,11 +59,6 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
     await refresh()
   }
 
-  const resetCourses = async () => {
-    const list = await api.courses.reset()
-    setCourses(list)
-  }
-
   const value = useMemo<CoursesContextValue>(
     () => ({
       courses,
@@ -74,7 +67,6 @@ export function CoursesProvider({ children }: { children: ReactNode }) {
       addCourse,
       updateCourse,
       deleteCourse,
-      resetCourses,
     }),
     [courses, loading],
   )

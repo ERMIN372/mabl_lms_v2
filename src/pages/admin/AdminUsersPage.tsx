@@ -55,13 +55,6 @@ export default function AdminUsersPage() {
     }
   }
 
-  const onReset = async () => {
-    if (window.confirm('Вернуть список участников к исходным демо-данным? Все правки будут потеряны.')) {
-      await api.users.reset()
-      reload()
-    }
-  }
-
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     return users.filter((u) => {
@@ -80,14 +73,9 @@ export default function AdminUsersPage() {
         title="Участники"
         description="Список зарегистрированных пользователей: статус, записи на программы и прогресс."
         actions={
-          <>
-            <Button onClick={onReset} variant="secondary" size="sm">
-              Сбросить демо-данные
-            </Button>
-            <Button to="/admin/users/new" size="sm">
-              + Добавить участника
-            </Button>
-          </>
+          <Button to="/admin/users/new" size="sm">
+            + Добавить участника
+          </Button>
         }
       />
 

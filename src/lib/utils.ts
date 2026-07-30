@@ -56,5 +56,3 @@ export function formatDuration(hours: number): string {
   return `${h} ч ${m} мин`
 }
 
-/** Имитация задержки сети для mock-сценариев */
-export const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))

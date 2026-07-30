@@ -1,35 +1,27 @@
 import bcrypt from 'bcryptjs'
 import type { NeonQueryFunction } from '@neondatabase/serverless'
-import { courses as seedCourses } from '../src/data/courses.js'
-import { adminUsers as seedParticipants } from '../src/data/users.js'
-import { orders as seedOrders } from '../src/data/orders.js'
 
 /**
- * Совместно используемая логика инициализации БД (схема + сиды).
+ * Совместно используемая логика инициализации БД (схема + стартовый админ).
  * Вызывается из api/setup.ts (по секрету) и из админ-панели (POST /api/admin/db/init).
  */
 
 type Sql = NeonQueryFunction<false, false>
 
-/** Демо-аккаунты по умолчанию (логин + пароль на экране входа). */
-export const defaultUsers = [
-  {
-    id: 'u-001',
-    name: 'Александр Орлов',
-    email: 'demo@mabl.ru',
-    role: 'Слушатель академии',
-    kind: 'student',
-    password: 'mabl2026',
-  },
-  {
-    id: 'u-adm',
-    name: 'Администратор',
-    email: 'admin@mabl.ru',
-    role: 'Администратор платформы',
-    kind: 'admin',
-    password: 'admin2026',
-  },
-]
+/**
+ * Стартовый аккаунт администратора. Создаётся только если такого e-mail в базе
+ * ещё нет; логин и пароль можно задать переменными окружения ADMIN_EMAIL и
+ * ADMIN_PASSWORD. Контент платформы (программы, события, материалы, участники,
+ * заказы) создаётся из админ-панели — демо-данными база не наполняется.
+ */
+export const defaultAdmin = {
+  id: 'u-adm',
+  name: 'Администратор',
+  email: (process.env.ADMIN_EMAIL || 'admin@mabl.ru').trim().toLowerCase(),
+  role: 'Администратор платформы',
+  kind: 'admin',
+  password: process.env.ADMIN_PASSWORD || 'admin2026',
+}
 
 /** Создаёт таблицы, если их ещё нет. */
 export async function ensureSchema(sql: Sql): Promise<void> {
@@ -113,44 +105,17 @@ export async function ensureSchema(sql: Sql): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_content_collection ON content (collection, sort_order)`
 }
 
-/** Полная инициализация: схема + сиды курсов и аккаунтов (без перезаписи существующих). */
+/** Инициализация: схема + стартовый администратор (без перезаписи существующих данных). */
 export async function initDatabase(sql: Sql): Promise<{ courses: number; users: number }> {
   await ensureSchema(sql)
 
-  for (let i = 0; i < seedCourses.length; i += 1) {
-    const course = seedCourses[i]
-    await sql`
-      INSERT INTO courses (id, data, sort_order)
-      VALUES (${course.id}, ${JSON.stringify(course)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-
-  for (let i = 0; i < seedParticipants.length; i += 1) {
-    const p = seedParticipants[i]
-    await sql`
-      INSERT INTO participants (id, data, sort_order)
-      VALUES (${p.id}, ${JSON.stringify(p)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-  for (let i = 0; i < seedOrders.length; i += 1) {
-    const o = seedOrders[i]
-    await sql`
-      INSERT INTO orders (id, data, sort_order)
-      VALUES (${o.id}, ${JSON.stringify(o)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-
-  for (const u of defaultUsers) {
-    const hash = await bcrypt.hash(u.password, 10)
-    await sql`
-      INSERT INTO users (id, name, email, role, kind, password_hash)
-      VALUES (${u.id}, ${u.name}, ${u.email}, ${u.role}, ${u.kind}, ${hash})
-      ON CONFLICT (email) DO NOTHING
-    `
-  }
+  const hash = await bcrypt.hash(defaultAdmin.password, 10)
+  await sql`
+    INSERT INTO users (id, name, email, role, kind, password_hash)
+    VALUES (${defaultAdmin.id}, ${defaultAdmin.name}, ${defaultAdmin.email},
+      ${defaultAdmin.role}, ${defaultAdmin.kind}, ${hash})
+    ON CONFLICT (email) DO NOTHING
+  `
 
   const [{ count: usersCount }] = await sql`SELECT COUNT(*)::int AS count FROM users`
   const [{ count: coursesCount }] = await sql`SELECT COUNT(*)::int AS count FROM courses`

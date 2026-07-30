@@ -50,8 +50,12 @@ export const coursesApi = {
     return http<void>(`/courses/${id}`, { method: 'DELETE' })
   },
 
-  /** Сброс каталога к исходным данным (сидам). */
-  async reset(): Promise<Course[]> {
-    return http<Course[]>('/courses/reset', { method: 'POST' })
+  /**
+   * Программы, доступные текущему пользователю (по оплаченным заказам).
+   * Требует токен сессии; гостю сервер отвечает пустым списком.
+   */
+  async myAccess(): Promise<string[]> {
+    const res = await http<{ courseIds: string[] }>('/me/courses')
+    return res.courseIds ?? []
   },
 }

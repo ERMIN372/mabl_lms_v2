@@ -46,9 +46,6 @@ export const databaseApi = {
     return http('/admin/db/init', { method: 'POST' })
   },
 
-  async resetCourses(): Promise<unknown> {
-    return http('/admin/db/reset-courses', { method: 'POST' })
-  },
 
   async createUser(user: NewDbUser): Promise<DbUser> {
     return http<DbUser>('/admin/db/users', { method: 'POST', body: JSON.stringify(user) })

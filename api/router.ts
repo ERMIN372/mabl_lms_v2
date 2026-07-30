@@ -22,18 +22,6 @@ import type {
   User,
 } from '../src/types'
 
-// Mock-модули служат источником статического контента (только import type внутри —
-// при сборке зависимостей от @/ не остаётся). Расширения .js обязательны для ESM.
-import { courses as seedCourses } from '../src/data/courses.js'
-import { events as seedEvents } from '../src/data/events.js'
-import { news } from '../src/data/news.js'
-import { materials as seedMaterials } from '../src/data/materials.js'
-import { surveys as seedSurveys } from '../src/data/surveys.js'
-import { forumSections as seedForumSections, forumTopics as seedForumTopics } from '../src/data/forum.js'
-import { notifications as seedNotifications } from '../src/data/notifications.js'
-import { orders } from '../src/data/orders.js'
-import { adminUsers } from '../src/data/users.js'
-
 /**
  * Единый роутер всех /api/* эндпоинтов.
  *
@@ -41,9 +29,8 @@ import { adminUsers } from '../src/data/users.js'
  * (`/api/(.*) → /api/router?path=$1`) — детерминированно для всех HTTP-методов.
  * Файл api/setup.ts имеет приоритет (прямое попадание по файловой системе).
  *
- * Каталог курсов и аутентификация — из БД Neon; остальные ресурсы (события,
- * новости, материалы, форум, опросники, заказы, участники) пока отдаются из
- * mock-модулей, единых с фронтендом.
+ * Все ресурсы (курсы, аккаунты, события, новости, материалы, форум, опросники,
+ * заказы, участники) хранятся в БД Neon и наполняются из админ-панели.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS — нужен для POST/PUT/DELETE из браузера.
@@ -82,8 +69,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const isMutation = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
   const isPublicMutation =
     path === 'auth/login' ||
+    path === 'auth/register' ||
     path === 'auth/recover' ||
-    path === 'auth/migrate' ||
+    // Оплату инициирует слушатель: права проверяются внутри обработчика по
+    // токену сессии (а не по правам администратора).
     path === 'payments/create' ||
     path === 'payments/webhook' ||
     // Выдачу токена загрузки в Blob вызывает клиент SDK (@vercel/blob) без нашего
@@ -99,10 +88,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (path === 'auth/login' && method === 'POST') {
       return await login(req, res)
     }
-    if (path === 'auth/migrate' && method === 'POST') {
-      const sql = getSql()
-      await sql`UPDATE users SET name = 'Администратор' WHERE id = 'u-adm' AND name = 'Елена Северова'`
-      return res.json({ ok: true })
+    if (path === 'auth/register' && method === 'POST') {
+      return await register(req, res)
     }
     if (path === 'auth/recover' && method === 'POST') {
       const { email } = parseBody(req)
@@ -112,15 +99,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.json({ message: `Инструкция по восстановлению доступа отправлена на ${email}.` })
     }
 
+    // ---------- ДОСТУП ПОЛЬЗОВАТЕЛЯ ----------
+    // Программы, открытые текущему пользователю: только по оплаченным заказам.
+    if (path === 'me/courses' && method === 'GET') {
+      return res.json({ courseIds: await listAccessibleCourseIds(req) })
+    }
+
     // ---------- COURSES (БД) ----------
     if (path === 'courses' && method === 'GET') {
       return res.json(await listCourses())
     }
     if (path === 'courses' && method === 'POST') {
       return await createCourse(req, res)
-    }
-    if (path === 'courses/reset' && method === 'POST') {
-      return await resetCourses(res)
     }
     if (segments[0] === 'courses' && segments.length === 2) {
       const id = segments[1]
@@ -134,7 +124,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ---------- EVENTS (БД) ----------
     if (path === 'events' && method === 'GET') {
-      return res.json(await contentList<CalendarEvent>('events', seedEvents))
+      return res.json(await contentList<CalendarEvent>('events'))
     }
     if (path === 'events' && method === 'POST') {
       return res.status(201).json(
@@ -142,14 +132,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       )
     }
     if (path === 'events/next' && method === 'GET') {
-      const list = await contentList<CalendarEvent>('events', seedEvents)
+      const list = await contentList<CalendarEvent>('events')
       const next = list
         .filter((e) => e.type === 'Вебинар')
         .sort((a, b) => +new Date(a.date) - +new Date(b.date))[0]
       return res.json(next ?? null)
-    }
-    if (path === 'events/reset' && method === 'POST') {
-      return res.json(await contentReset<CalendarEvent>('events', seedEvents))
     }
     if (segments[0] === 'events' && segments.length === 2) {
       const id = segments[1]
@@ -168,11 +155,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'news' && method === 'GET') return res.json(await listNews())
     if (path === 'news' && method === 'POST') return await createNews(req, res)
-    if (path === 'news/reset' && method === 'POST') {
-      const sql = getSql()
-      await sql`DELETE FROM news`
-      return res.json([])
-    }
     // Комментарии и реакции к новости.
     if (segments[0] === 'news' && segments.length >= 3) {
       const newsId = segments[1]
@@ -198,15 +180,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ---------- MATERIALS (БД) ----------
     if (path === 'materials' && method === 'GET') {
-      return res.json(await contentList<Material>('materials', seedMaterials))
+      return res.json(await contentList<Material>('materials'))
     }
     if (path === 'materials' && method === 'POST') {
       return res.status(201).json(
         await contentCreate<Material>('materials', parseBody(req) as Material, 'material'),
       )
-    }
-    if (path === 'materials/reset' && method === 'POST') {
-      return res.json(await contentReset<Material>('materials', seedMaterials))
     }
     if (segments[0] === 'materials' && segments.length === 2) {
       const id = segments[1]
@@ -217,15 +196,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ---------- SURVEYS (БД) ----------
     if (path === 'surveys' && method === 'GET') {
-      return res.json(await contentList<Survey>('surveys', seedSurveys))
+      return res.json(await contentList<Survey>('surveys'))
     }
     if (path === 'surveys' && method === 'POST') {
       return res.status(201).json(
         await contentCreate<Survey>('surveys', parseBody(req) as Survey, 'survey'),
       )
-    }
-    if (path === 'surveys/reset' && method === 'POST') {
-      return res.json(await contentReset<Survey>('surveys', seedSurveys))
     }
     if (segments[0] === 'surveys' && segments.length === 2) {
       const id = segments[1]
@@ -247,7 +223,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(201).json(created)
     }
     if (path === 'forum/topics' && method === 'GET') {
-      return res.json(await contentList<ForumTopic>('forum_topics', seedForumTopics))
+      return res.json(await contentList<ForumTopic>('forum_topics'))
     }
     if (path === 'forum/topics' && method === 'POST') {
       const body = parseBody(req) as ForumTopic
@@ -259,11 +235,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       )
       return res.status(201).json(created)
     }
-    if (path === 'forum/reset' && method === 'POST') {
-      await contentReset<ForumSection>('forum_sections', seedForumSections)
-      await contentReset<ForumTopic>('forum_topics', seedForumTopics)
-      return res.json({ ok: true })
-    }
     if (segments[0] === 'forum' && segments[1] === 'sections' && segments.length === 3) {
       const id = segments[2]
       if (method === 'GET') {
@@ -274,7 +245,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (method === 'DELETE') {
         await contentRemove('forum_sections', id)
         // Темы удалённого раздела убираем, чтобы не «висели» без раздела.
-        const topics = await contentList<ForumTopic>('forum_topics', seedForumTopics)
+        const topics = await contentList<ForumTopic>('forum_topics')
         for (const t of topics.filter((t) => t.sectionId === id)) await contentRemove('forum_topics', t.id)
         return res.status(204).end()
       }
@@ -288,15 +259,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ---------- NOTIFICATIONS (БД) ----------
     if (path === 'notifications' && method === 'GET') {
-      return res.json(await contentList<AppNotification>('notifications', seedNotifications))
+      return res.json(await contentList<AppNotification>('notifications'))
     }
     if (path === 'notifications' && method === 'POST') {
       return res.status(201).json(
         await contentCreate<AppNotification>('notifications', parseBody(req) as AppNotification, 'note', true),
       )
-    }
-    if (path === 'notifications/reset' && method === 'POST') {
-      return res.json(await contentReset<AppNotification>('notifications', seedNotifications))
     }
     if (segments[0] === 'notifications' && segments.length === 2) {
       const id = segments[1]
@@ -318,9 +286,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const counts = await initDatabase(sql)
       return res.json({ ok: true, counts })
     }
-    if (path === 'admin/db/reset-courses' && method === 'POST') {
-      return await resetCourses(res)
-    }
     if (path === 'admin/db/users' && method === 'POST') {
       return await createDbUser(req, res)
     }
@@ -337,7 +302,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return await serveScormFile(segments[1], segments.slice(2).join('/'), res)
     }
     if (path === 'scorm' && method === 'GET') {
-      return res.json(await contentList<ScormPackageMeta>('scorm', []))
+      return res.json(await contentList<ScormPackageMeta>('scorm'))
     }
     // Преflight перед загрузкой: сообщает клиенту конкретную причину отказа
     // (истёкшая админ-сессия или неподключённое хранилище Blob), потому что SDK
@@ -402,7 +367,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ---------- ADMIN · УЧАСТНИКИ (БД) ----------
     if (path === 'admin/users' && method === 'GET') return res.json(await listParticipants())
     if (path === 'admin/users' && method === 'POST') return await createParticipant(req, res)
-    if (path === 'admin/users/reset' && method === 'POST') return await resetParticipants(res)
     if (
       segments[0] === 'admin' &&
       segments[1] === 'users' &&
@@ -431,16 +395,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return await handlePaymentWebhook(req, res)
     }
     if (segments[0] === 'payments' && segments[1] === 'by-order' && segments.length === 3 && method === 'GET') {
-      return await getOrderPaymentStatus(segments[2], res)
+      return await getOrderPaymentStatus(segments[2], req, res)
     }
     if (segments[0] === 'payments' && segments.length === 2 && method === 'GET') {
-      return await getPaymentStatus(segments[1], res)
+      return await getPaymentStatus(segments[1], req, res)
     }
 
     // ---------- ADMIN · ЗАКАЗЫ (БД) ----------
     if (path === 'admin/orders' && method === 'GET') return res.json(await listOrders())
     if (path === 'admin/orders' && method === 'POST') return await createOrder(req, res)
-    if (path === 'admin/orders/reset' && method === 'POST') return await resetOrders(res)
     if (segments[0] === 'admin' && segments[1] === 'orders' && segments.length === 3) {
       const id = segments[2]
       if (method === 'GET') return found(res, await getOrder(id), 'Заказ не найден')
@@ -507,17 +470,70 @@ async function login(req: VercelRequest, res: VercelResponse) {
   return res.json({ ...user, token })
 }
 
+/**
+ * POST /api/auth/register
+ * Самостоятельная регистрация слушателя: аккаунт нужен, чтобы оплатить
+ * программу и получить к ней доступ. Сразу выдаёт токен сессии.
+ */
+async function register(req: VercelRequest, res: VercelResponse) {
+  const body = parseBody(req)
+  const name = String(body.name ?? '').trim()
+  const email = String(body.email ?? '').trim().toLowerCase()
+  const password = String(body.password ?? '')
+  if (!name) return res.status(400).json({ message: 'Укажите имя и фамилию.' })
+  if (!email.includes('@')) return res.status(400).json({ message: 'Укажите корректный e-mail.' })
+  if (password.length < 8) {
+    return res.status(400).json({ message: 'Пароль должен быть не короче 8 символов.' })
+  }
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const exists = await sql`SELECT id FROM users WHERE email = ${email} LIMIT 1`
+  if (exists[0]) {
+    return res.status(409).json({ message: 'Аккаунт с таким e-mail уже существует — войдите.' })
+  }
+
+  const id = `u-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  const role = 'Слушатель академии'
+  const hash = await bcrypt.hash(password, 10)
+  await sql`
+    INSERT INTO users (id, name, email, role, kind, password_hash)
+    VALUES (${id}, ${name}, ${email}, ${role}, 'student', ${hash})
+  `
+
+  // Дублируем в «Участники», чтобы новый слушатель был виден администратору.
+  const participant: AdminUser = {
+    id,
+    name,
+    email,
+    role: 'student',
+    status: 'active',
+    registeredAt: new Date().toISOString().slice(0, 10),
+    lastActiveAt: new Date().toISOString().slice(0, 10),
+    enrolledCourseIds: [],
+    avgProgress: 0,
+  }
+  const [{ max }] = await sql`SELECT COALESCE(MAX(sort_order), 0) + 1 AS max FROM participants`
+  await sql`
+    INSERT INTO participants (id, data, sort_order)
+    VALUES (${id}, ${JSON.stringify(participant)}::jsonb, ${Number(max)})
+    ON CONFLICT (id) DO NOTHING
+  `
+
+  const user: User = { id, name, email, role, kind: 'student' }
+  return res.status(201).json({ ...user, token: signToken({ id, kind: 'student' }) })
+}
+
 async function listCourses(): Promise<Course[]> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM courses ORDER BY sort_order ASC`
-  if (rows.length === 0) return seedCourses
   return rows.map((r) => r.data as Course)
 }
 
 async function getCourse(id: string): Promise<Course | undefined> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM courses WHERE id = ${id} LIMIT 1`
-  return rows[0] ? (rows[0].data as Course) : seedCourses.find((c) => c.id === id)
+  return rows[0] ? (rows[0].data as Course) : undefined
 }
 
 async function createCourse(req: VercelRequest, res: VercelResponse) {
@@ -552,18 +568,6 @@ async function deleteCourse(id: string, res: VercelResponse) {
   return res.status(204).end()
 }
 
-async function resetCourses(res: VercelResponse) {
-  const sql = getSql()
-  await sql`DELETE FROM courses`
-  for (let i = 0; i < seedCourses.length; i += 1) {
-    await sql`
-      INSERT INTO courses (id, data, sort_order)
-      VALUES (${seedCourses[i].id}, ${JSON.stringify(seedCourses[i])}::jsonb, ${i})
-    `
-  }
-  return res.json(seedCourses)
-}
-
 // ---------------- news helpers ----------------
 
 async function listNews(): Promise<NewsItem[]> {
@@ -571,23 +575,17 @@ async function listNews(): Promise<NewsItem[]> {
     const sql = getSql()
     await ensureSchema(sql)
     const rows = await sql`SELECT data FROM news ORDER BY published_at DESC NULLS LAST`
-    if (rows.length === 0) return news
     return rows.map((r) => r.data as NewsItem)
   } catch {
-    // Нет БД (например, локальный mock-режим) — отдаём статический список.
-    return news
+    // БД недоступна — новостей нет.
+    return []
   }
 }
 
 async function getNewsItem(id: string): Promise<NewsItem | undefined> {
-  try {
-    const sql = getSql()
-    const rows = await sql`SELECT data FROM news WHERE id = ${id} LIMIT 1`
-    if (rows[0]) return rows[0].data as NewsItem
-  } catch {
-    /* fallthrough к статике */
-  }
-  return news.find((n) => n.id === id)
+  const sql = getSql()
+  const rows = await sql`SELECT data FROM news WHERE id = ${id} LIMIT 1`
+  return rows[0] ? (rows[0].data as NewsItem) : undefined
 }
 
 async function createNews(req: VercelRequest, res: VercelResponse) {
@@ -726,23 +724,9 @@ async function toggleReaction(newsId: string, req: VercelRequest, res: VercelRes
 
 // ---------------- admin participants (БД) ----------------
 
-async function ensureParticipantsSeeded(sql: ReturnType<typeof getSql>) {
-  const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM participants`
-  if (Number(count) > 0) return
-  for (let i = 0; i < adminUsers.length; i += 1) {
-    const p = adminUsers[i]
-    await sql`
-      INSERT INTO participants (id, data, sort_order)
-      VALUES (${p.id}, ${JSON.stringify(p)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-}
-
 async function listParticipants(): Promise<AdminUser[]> {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureParticipantsSeeded(sql)
   const rows = await sql`SELECT data FROM participants ORDER BY sort_order ASC`
   return rows.map((r) => r.data as AdminUser)
 }
@@ -750,7 +734,7 @@ async function listParticipants(): Promise<AdminUser[]> {
 async function getParticipant(id: string): Promise<AdminUser | undefined> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM participants WHERE id = ${id} LIMIT 1`
-  return rows[0] ? (rows[0].data as AdminUser) : adminUsers.find((u) => u.id === id)
+  return rows[0] ? (rows[0].data as AdminUser) : undefined
 }
 
 async function createParticipant(req: VercelRequest, res: VercelResponse) {
@@ -782,7 +766,6 @@ async function updateParticipant(id: string, req: VercelRequest, res: VercelResp
 async function setParticipantStatus(id: string, status: string, res: VercelResponse) {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureParticipantsSeeded(sql)
   const rows = await sql`SELECT data FROM participants WHERE id = ${id} LIMIT 1`
   if (!rows[0]) return res.status(404).json({ message: 'Участник не найден' })
   const next = { ...(rows[0].data as AdminUser), status } as AdminUser
@@ -793,43 +776,15 @@ async function setParticipantStatus(id: string, status: string, res: VercelRespo
 async function deleteParticipant(id: string, res: VercelResponse) {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureParticipantsSeeded(sql)
   await sql`DELETE FROM participants WHERE id = ${id}`
   return res.status(204).end()
 }
 
-async function resetParticipants(res: VercelResponse) {
-  const sql = getSql()
-  await ensureSchema(sql)
-  await sql`DELETE FROM participants`
-  for (let i = 0; i < adminUsers.length; i += 1) {
-    await sql`
-      INSERT INTO participants (id, data, sort_order)
-      VALUES (${adminUsers[i].id}, ${JSON.stringify(adminUsers[i])}::jsonb, ${i})
-    `
-  }
-  return res.json(adminUsers)
-}
-
 // ---------------- admin orders (БД) ----------------
-
-async function ensureOrdersSeeded(sql: ReturnType<typeof getSql>) {
-  const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM orders`
-  if (Number(count) > 0) return
-  for (let i = 0; i < orders.length; i += 1) {
-    const o = orders[i]
-    await sql`
-      INSERT INTO orders (id, data, sort_order)
-      VALUES (${o.id}, ${JSON.stringify(o)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-}
 
 async function listOrders(): Promise<Order[]> {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureOrdersSeeded(sql)
   const rows = await sql`SELECT data FROM orders ORDER BY sort_order ASC`
   return rows.map((r) => r.data as Order)
 }
@@ -837,7 +792,7 @@ async function listOrders(): Promise<Order[]> {
 async function getOrder(id: string): Promise<Order | undefined> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM orders WHERE id = ${id} LIMIT 1`
-  return rows[0] ? (rows[0].data as Order) : orders.find((o) => o.id === id)
+  return rows[0] ? (rows[0].data as Order) : undefined
 }
 
 async function createOrder(req: VercelRequest, res: VercelResponse) {
@@ -878,22 +833,28 @@ async function updateOrder(id: string, req: VercelRequest, res: VercelResponse) 
 async function deleteOrder(id: string, res: VercelResponse) {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureOrdersSeeded(sql)
   await sql`DELETE FROM orders WHERE id = ${id}`
   return res.status(204).end()
 }
 
-async function resetOrders(res: VercelResponse) {
+// ---------------- доступ к программам ----------------
+
+/**
+ * Программы, открытые пользователю: только оплаченные заказы (status = paid),
+ * привязанные к id из токена сессии. Без токена доступа нет — гость видит
+ * только описание программы.
+ */
+async function listAccessibleCourseIds(req: VercelRequest): Promise<string[]> {
+  const session = verifyToken(bearer(req))
+  if (!session) return []
   const sql = getSql()
   await ensureSchema(sql)
-  await sql`DELETE FROM orders`
-  for (let i = 0; i < orders.length; i += 1) {
-    await sql`
-      INSERT INTO orders (id, data, sort_order)
-      VALUES (${orders[i].id}, ${JSON.stringify(orders[i])}::jsonb, ${i})
-    `
-  }
-  return res.json(orders)
+  const rows = await sql`
+    SELECT data->>'courseId' AS course_id FROM orders
+    WHERE data->>'userId' = ${session.id} AND data->>'status' = 'paid'
+  `
+  const ids = rows.map((r) => r.course_id as string).filter(Boolean)
+  return Array.from(new Set(ids))
 }
 
 // ---------------- payments (ЮKassa) ----------------
@@ -908,7 +869,8 @@ function siteOrigin(req: VercelRequest): string {
 
 /**
  * POST /api/payments/create
- * Тело: { courseId, email, userId? }
+ * Тело: { courseId, email? }. Требует токен сессии — заказ привязывается к
+ * пользователю из токена (клиент чужой userId подставить не может).
  * Создаёт платёж в ЮKassa, заводит заказ со статусом pending и возвращает
  * ссылку на платёжную форму. Цена берётся из БД — клиент её не диктует.
  */
@@ -916,7 +878,12 @@ async function createCoursePayment(req: VercelRequest, res: VercelResponse) {
   if (!isYooKassaConfigured()) {
     return res.status(503).json({ message: 'Онлайн-оплата временно недоступна.' })
   }
-  const { courseId, email, userId } = parseBody(req)
+  const session = verifyToken(bearer(req))
+  if (!session) {
+    return res.status(401).json({ message: 'Войдите в личный кабинет, чтобы оформить доступ.' })
+  }
+  const userId = session.id
+  const { courseId, email } = parseBody(req)
   const course = await getCourse(String(courseId ?? ''))
   if (!course) return res.status(404).json({ message: 'Программа не найдена' })
   if (!course.price || course.price <= 0) {
@@ -941,14 +908,14 @@ async function createCoursePayment(req: VercelRequest, res: VercelResponse) {
     currency: 'RUB',
     description: `Доступ к программе «${course.title}» (${orderId})`,
     returnUrl: `${siteOrigin(req)}/checkout?course=${course.id}&order=${orderId}`,
-    metadata: { orderId, courseId: course.id, userId: String(userId ?? '') },
+    metadata: { orderId, courseId: course.id, userId },
     idempotenceKey: orderId,
     receiptEmail: email ? String(email) : undefined,
   })
 
   const order: Order = {
     id: orderId,
-    userId: String(userId ?? ''),
+    userId,
     courseId: course.id,
     amount: course.price,
     date: new Date().toISOString().slice(0, 10),
@@ -1018,7 +985,10 @@ async function handlePaymentWebhook(req: VercelRequest, res: VercelResponse) {
  * Используется на странице возврата, чтобы показать актуальный статус, не
  * дожидаясь webhook.
  */
-async function getPaymentStatus(id: string, res: VercelResponse) {
+async function getPaymentStatus(id: string, req: VercelRequest, res: VercelResponse) {
+  if (verifyToken(bearer(req))?.kind !== 'admin') {
+    return res.status(403).json({ message: 'Требуются права администратора.' })
+  }
   if (!isYooKassaConfigured()) return res.status(503).json({ message: 'Онлайн-оплата недоступна.' })
   const payment = await getPayment(id)
   const order = await applyPaymentStatus(payment)
@@ -1029,12 +999,18 @@ async function getPaymentStatus(id: string, res: VercelResponse) {
  * GET /api/payments/by-order/:orderId
  * Возврат после оплаты: по номеру заказа находим платёж, перезапрашиваем его
  * статус в ЮKassa и отдаём актуальное состояние (не дожидаясь webhook).
+ * Статус заказа виден только его владельцу и администратору.
  */
-async function getOrderPaymentStatus(orderId: string, res: VercelResponse) {
+async function getOrderPaymentStatus(orderId: string, req: VercelRequest, res: VercelResponse) {
+  const session = verifyToken(bearer(req))
+  if (!session) return res.status(401).json({ message: 'Войдите в личный кабинет.' })
   const sql = getSql()
   const rows = await sql`SELECT data FROM orders WHERE id = ${orderId} LIMIT 1`
   if (!rows[0]) return res.status(404).json({ message: 'Заказ не найден' })
   const order = rows[0].data as Order
+  if (session.kind !== 'admin' && order.userId !== session.id) {
+    return res.status(403).json({ message: 'Заказ оформлен на другой аккаунт.' })
+  }
   if (!order.paymentId || !isYooKassaConfigured()) {
     return res.json({ orderId, status: order.status, paid: order.status === 'paid' })
   }
@@ -1104,6 +1080,28 @@ async function createDbUser(req: VercelRequest, res: VercelResponse) {
     INSERT INTO users (id, name, email, role, kind, password_hash)
     VALUES (${id}, ${name}, ${email}, ${finalRole}, ${kind}, ${hash})
   `
+  // Слушателя дублируем в «Участники» — иначе его не выбрать при выдаче
+  // доступа заказом.
+  if (kind === 'student') {
+    const today = new Date().toISOString().slice(0, 10)
+    const participant: AdminUser = {
+      id,
+      name,
+      email,
+      role: 'student',
+      status: 'active',
+      registeredAt: today,
+      lastActiveAt: today,
+      enrolledCourseIds: [],
+      avgProgress: 0,
+    }
+    const [{ max }] = await sql`SELECT COALESCE(MAX(sort_order), 0) + 1 AS max FROM participants`
+    await sql`
+      INSERT INTO participants (id, data, sort_order)
+      VALUES (${id}, ${JSON.stringify(participant)}::jsonb, ${Number(max)})
+      ON CONFLICT (id) DO NOTHING
+    `
+  }
   return res.status(201).json({ id, name, email, role: finalRole, kind })
 }
 
@@ -1578,24 +1576,13 @@ async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
 
 // ---------------- универсальное хранилище контента ----------------
 // События, материалы, опросники, разделы/темы форума и уведомления хранятся в
-// общей таблице content, ключ — (collection, id). Сиды переносятся в БД при
-// первом обращении к пустой коллекции.
+// общей таблице content, ключ — (collection, id). Наполняются из админ-панели.
 
 type WithId = { id: string; title?: string }
 
-async function contentList<T extends WithId>(collection: string, seed: T[]): Promise<T[]> {
+async function contentList<T extends WithId>(collection: string): Promise<T[]> {
   const sql = getSql()
   await ensureSchema(sql)
-  const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM content WHERE collection = ${collection}`
-  if (Number(count) === 0 && seed.length > 0) {
-    for (let i = 0; i < seed.length; i += 1) {
-      await sql`
-        INSERT INTO content (collection, id, data, sort_order)
-        VALUES (${collection}, ${seed[i].id}, ${JSON.stringify(seed[i])}::jsonb, ${i})
-        ON CONFLICT (collection, id) DO NOTHING
-      `
-    }
-  }
   const rows = await sql`SELECT data FROM content WHERE collection = ${collection} ORDER BY sort_order ASC`
   return rows.map((r) => r.data as T)
 }
@@ -1654,23 +1641,10 @@ async function contentRemove(collection: string, id: string): Promise<void> {
   await sql`DELETE FROM content WHERE collection = ${collection} AND id = ${id}`
 }
 
-async function contentReset<T extends WithId>(collection: string, seed: T[]): Promise<T[]> {
-  const sql = getSql()
-  await ensureSchema(sql)
-  await sql`DELETE FROM content WHERE collection = ${collection}`
-  for (let i = 0; i < seed.length; i += 1) {
-    await sql`
-      INSERT INTO content (collection, id, data, sort_order)
-      VALUES (${collection}, ${seed[i].id}, ${JSON.stringify(seed[i])}::jsonb, ${i})
-    `
-  }
-  return seed
-}
-
 /** Разделы форума со счётчиком тем, посчитанным по фактическим темам. */
 async function forumSectionsWithCounts(): Promise<ForumSection[]> {
-  const sections = await contentList<ForumSection>('forum_sections', seedForumSections)
-  const topics = await contentList<ForumTopic>('forum_topics', seedForumTopics)
+  const sections = await contentList<ForumSection>('forum_sections')
+  const topics = await contentList<ForumTopic>('forum_topics')
   return sections.map((s) => ({
     ...s,
     topicsCount: topics.filter((t) => t.sectionId === s.id).length,

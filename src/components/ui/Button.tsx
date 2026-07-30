@@ -34,7 +34,7 @@ interface CommonProps {
 }
 
 type ButtonAsButton = CommonProps & ButtonHTMLAttributes<HTMLButtonElement> & { to?: undefined }
-type ButtonAsLink = CommonProps & { to: string }
+type ButtonAsLink = CommonProps & { to: string; state?: unknown }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonAsButton | ButtonAsLink>(
   function Button(props, ref) {
@@ -43,7 +43,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonAsButton | ButtonAsLin
 
     if ('to' in props && props.to) {
       return (
-        <Link to={props.to} className={classes}>
+        <Link to={props.to} state={props.state} className={classes}>
           {children}
         </Link>
       )
