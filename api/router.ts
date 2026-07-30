@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import bcrypt from 'bcryptjs'
 import { getSql } from './_db.js'
 import { ensureSchema, initDatabase } from './_seed.js'
+import { findDemoRows, purgeDemoRows } from './_demo.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
 import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
@@ -285,6 +286,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const sql = getSql()
       const counts = await initDatabase(sql)
       return res.json({ ok: true, counts })
+    }
+    // Остатки старых демо-сидов в БД: сначала показать, потом удалить.
+    if (path === 'admin/db/demo' && method === 'GET') {
+      const sql = getSql()
+      await ensureSchema(sql)
+      return res.json({ rows: await findDemoRows(sql) })
+    }
+    if (path === 'admin/db/demo/purge' && method === 'POST') {
+      const sql = getSql()
+      await ensureSchema(sql)
+      return res.json(await purgeDemoRows(sql))
     }
     if (path === 'admin/db/users' && method === 'POST') {
       return await createDbUser(req, res)
