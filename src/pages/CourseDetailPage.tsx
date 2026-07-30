@@ -19,9 +19,12 @@ import type { Lesson } from '@/types'
 /** Плейсхолдер плеера в зависимости от формата урока. */
 function LessonPlayer({
   lesson,
+  student,
   onScormStatus,
 }: {
   lesson: Lesson
+  /** Слушатель, которому засчитывается прохождение тренинга. */
+  student: { id: string; name: string }
   onScormStatus?: (s: ScormStatus) => void
 }) {
   if (lesson.format === 'video') {
@@ -44,7 +47,11 @@ function LessonPlayer({
         <ScormPlayer
           src={lesson.launchUrl}
           title={lesson.title}
-          storageKey={`mabl.scorm.${lesson.id}`}
+          studentId={student.id}
+          studentName={student.name}
+          // Прогресс хранится в браузере, поэтому ключ привязан к слушателю:
+          // на общем компьютере иначе виден чужой прогресс.
+          storageKey={`mabl.scorm.${student.id}.${lesson.id}`}
           onStatus={onScormStatus}
         />
       )
@@ -85,7 +92,7 @@ export default function CourseDetailPage() {
   const { getCourseById, updateCourse } = useCourses()
   const course = getCourseById(id)
   const { canAccessCourse } = usePurchases()
-  const { isAuthenticated } = useAuth()
+  const { user, isAuthenticated } = useAuth()
   // Материалы программы открываются только авторизованному слушателю с
   // оплаченным заказом (бесплатные программы — сразу после входа). Гость видит
   // только описание.
@@ -186,7 +193,11 @@ export default function CourseDetailPage() {
                     </div>
                   </div>
                 )}
-                <LessonPlayer lesson={activeLesson} onScormStatus={handleScormStatus} />
+                <LessonPlayer
+                  lesson={activeLesson}
+                  student={{ id: user?.id ?? 'guest', name: user?.name || 'Слушатель' }}
+                  onScormStatus={handleScormStatus}
+                />
               </div>
             ) : (
               <div className="flex aspect-video flex-col items-center justify-center rounded-card border border-dashed border-ink-20 bg-ink-5 text-center">

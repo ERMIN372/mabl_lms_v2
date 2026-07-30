@@ -294,8 +294,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'admin/db/init' && method === 'POST') {
       const sql = getSql()
-      const counts = await initDatabase(sql)
-      return res.json({ ok: true, counts })
+      const { courses, users, ...admin } = await initDatabase(sql)
+      // adminPassword приходит только когда аккаунт создан этим вызовом и
+      // ADMIN_PASSWORD не задан: показать один раз и больше нигде не хранить.
+      return res.json({ ok: true, counts: { courses, users }, ...admin })
     }
     // Остатки старых демо-сидов в БД: сначала показать, потом удалить.
     if (path === 'admin/db/demo' && method === 'GET') {

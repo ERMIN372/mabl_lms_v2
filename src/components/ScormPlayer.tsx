@@ -51,11 +51,12 @@ function computeStatus(data: CmiData): ScormStatus {
 
 function createApi(
   storageKey: string,
+  studentId: string,
   studentName: string,
   emit: (s: ScormStatus) => void,
 ): Scorm12Api {
   const defaults: CmiData = {
-    'cmi.core.student_id': 'u-001',
+    'cmi.core.student_id': studentId,
     'cmi.core.student_name': studentName,
     'cmi.core.lesson_status': 'not attempted',
     'cmi.core.lesson_mode': 'normal',
@@ -106,9 +107,14 @@ interface ScormPlayerProps {
   /** URL точки входа SCORM (res/index.html). */
   src: string
   title: string
+  /** Идентификатор слушателя для cmi.core.student_id. */
+  studentId?: string
   /** Имя слушателя для cmi.core.student_name. */
   studentName?: string
-  /** Ключ для сохранения прогресса. */
+  /**
+   * Ключ для сохранения прогресса. Должен включать идентификатор слушателя:
+   * на общем компьютере иначе следующий вошедший увидит чужой прогресс.
+   */
   storageKey: string
   /** Колбэк при изменении статуса/прогресса SCORM. */
   onStatus?: (status: ScormStatus) => void
@@ -117,7 +123,8 @@ interface ScormPlayerProps {
 export function ScormPlayer({
   src,
   title,
-  studentName = 'Слушатель МАБЛ',
+  studentId = 'guest',
+  studentName = 'Слушатель',
   storageKey,
   onStatus,
 }: ScormPlayerProps) {
@@ -128,13 +135,13 @@ export function ScormPlayer({
   onStatusRef.current = onStatus
 
   useEffect(() => {
-    const api = createApi(storageKey, studentName, (s) => onStatusRef.current?.(s))
+    const api = createApi(storageKey, studentId, studentName, (s) => onStatusRef.current?.(s))
     window.API = api
     setReady(true)
     return () => {
       if (window.API === api) delete window.API
     }
-  }, [storageKey, studentName])
+  }, [storageKey, studentId, studentName])
 
   useEffect(() => {
     const onChange = () => setIsFullscreen(document.fullscreenElement === wrapRef.current)
