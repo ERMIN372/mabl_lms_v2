@@ -115,7 +115,7 @@ export default function AdminDatabasePage() {
           <CardBody className="space-y-5 p-5">
             <MaintenanceRow
               title="Инициализировать базу"
-              desc="Создаёт таблицы и заливает программы и демо-аккаунты, если их ещё нет. Существующие данные не затрагиваются."
+              desc="Создаёт таблицы и стартовый аккаунт администратора, если их ещё нет. Существующие данные не затрагиваются."
               action={
                 <Button
                   size="sm"
@@ -125,24 +125,6 @@ export default function AdminDatabasePage() {
                   }
                 >
                   {busy === 'init' ? 'Выполняется…' : 'Инициализировать'}
-                </Button>
-              }
-            />
-            <div className="border-t border-ink-10" />
-            <MaintenanceRow
-              title="Пересоздать программы"
-              desc="Удаляет все программы из базы и заливает их заново из исходного каталога. Изменения программ будут потеряны."
-              action={
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy !== null}
-                  onClick={() => {
-                    if (!window.confirm('Пересоздать каталог программ? Текущие изменения программ будут потеряны.')) return
-                    void run('reset', () => api.database.resetCourses().then(() => {}), 'Каталог программ пересоздан.')
-                  }}
-                >
-                  {busy === 'reset' ? 'Выполняется…' : 'Пересоздать'}
                 </Button>
               }
             />

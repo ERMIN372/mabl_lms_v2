@@ -31,7 +31,4 @@ export const eventsApi = {
     return http<void>(`/events/${id}`, { method: 'DELETE' })
   },
 
-  async reset(): Promise<CalendarEvent[]> {
-    return http<CalendarEvent[]>('/events/reset', { method: 'POST' })
-  },
 }

@@ -30,8 +30,4 @@ export const usersApi = {
     return http<void>(`/admin/users/${id}`, { method: 'DELETE' })
   },
 
-  /** Сброс к исходным данным (сидам). */
-  async reset(): Promise<AdminUser[]> {
-    return http<AdminUser[]>('/admin/users/reset', { method: 'POST' })
-  },
 }

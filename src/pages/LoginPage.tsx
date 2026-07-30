@@ -8,12 +8,13 @@ import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AuthContext'
 
 export default function LoginPage() {
-  const { login, recover } = useAuth()
+  const { login, register, recover } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string })?.from || '/dashboard'
 
-  const [mode, setMode] = useState<'login' | 'recover'>('login')
+  const [mode, setMode] = useState<'login' | 'register' | 'recover'>('login')
+  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -32,6 +33,21 @@ export default function LoginPage() {
       navigate(target, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка входа')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const submitRegister = async (e: FormEvent) => {
+    e.preventDefault()
+    setError('')
+    setInfo('')
+    setLoading(true)
+    try {
+      await register({ name, email, password })
+      navigate(from, { replace: true })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось создать аккаунт')
     } finally {
       setLoading(false)
     }
@@ -80,9 +96,19 @@ export default function LoginPage() {
             <Logo />
           </div>
 
-          <p className="eyebrow mb-3">{mode === 'login' ? 'Вход для слушателей' : 'Восстановление'}</p>
+          <p className="eyebrow mb-3">
+            {mode === 'login'
+              ? 'Вход для слушателей'
+              : mode === 'register'
+                ? 'Регистрация'
+                : 'Восстановление'}
+          </p>
           <h1 className="font-serif text-3xl text-neft">
-            {mode === 'login' ? 'Личный кабинет' : 'Восстановить доступ'}
+            {mode === 'login'
+              ? 'Личный кабинет'
+              : mode === 'register'
+                ? 'Создать аккаунт'
+                : 'Восстановить доступ'}
           </h1>
 
           {mode === 'login' ? (
@@ -130,6 +156,81 @@ export default function LoginPage() {
                   На главную
                 </Link>
               </div>
+
+              <p className="border-t border-ink-10 pt-5 text-sm text-ink-60">
+                Ещё нет аккаунта?{' '}
+                <button
+                  type="button"
+                  onClick={() => { setMode('register'); setError(''); setInfo('') }}
+                  className="text-ocean underline hover:text-oceanc-80"
+                >
+                  Зарегистрироваться
+                </button>
+              </p>
+            </form>
+          ) : mode === 'register' ? (
+            <form onSubmit={submitRegister} className="mt-9 space-y-5">
+              <p className="text-sm text-ink-60">
+                Аккаунт нужен, чтобы оформить доступ к программе: после оплаты курс
+                открывается в вашем личном кабинете.
+              </p>
+              <Input
+                label="Имя и фамилия"
+                name="name"
+                autoComplete="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+              />
+              <Input
+                label="E-mail"
+                type="email"
+                name="email"
+                autoComplete="email"
+                placeholder="you@company.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+              <Input
+                label="Пароль"
+                type="password"
+                name="password"
+                autoComplete="new-password"
+                placeholder="Минимум 8 символов"
+                hint="Не короче 8 символов."
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+
+              {error && (
+                <div className="rounded-token border border-ocean/40 bg-oceanc-10 px-4 py-3 text-sm text-ocean">
+                  {error}
+                </div>
+              )}
+
+              <Button type="submit" fullWidth size="lg" disabled={loading}>
+                {loading ? 'Создаём аккаунт…' : 'Создать аккаунт'}
+              </Button>
+              <p className="text-[0.72rem] text-ink-40">
+                Регистрируясь, вы принимаете{' '}
+                <Link to="/offer" className="underline hover:text-ink-80">публичную оферту</Link>,{' '}
+                <Link to="/privacy" className="underline hover:text-ink-80">политику конфиденциальности</Link>{' '}
+                и даёте{' '}
+                <Link to="/consent-personal-data" className="underline hover:text-ink-80">
+                  согласие на обработку персональных данных
+                </Link>{' '}
+                МАБЛ.
+              </p>
+              <button
+                type="button"
+                onClick={() => { setMode('login'); setError(''); setInfo('') }}
+                className="block text-sm text-ink-60 hover:text-neft"
+              >
+                ← Вернуться ко входу
+              </button>
             </form>
           ) : (
             <form onSubmit={submitRecover} className="mt-9 space-y-5">

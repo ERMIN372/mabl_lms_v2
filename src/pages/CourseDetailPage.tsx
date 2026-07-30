@@ -11,6 +11,7 @@ import { ScormPlayer } from '@/components/ScormPlayer'
 import type { ScormStatus } from '@/components/ScormPlayer'
 import { useCourses } from '@/context/CoursesContext'
 import { usePurchases } from '@/context/PurchaseContext'
+import { useAuth } from '@/context/AuthContext'
 import { formatPrice, formatDuration, displayTitle, cn } from '@/lib/utils'
 import { courseFormatLabel } from '@/lib/labels'
 import type { Lesson } from '@/types'
@@ -83,9 +84,12 @@ export default function CourseDetailPage() {
   const { id = '' } = useParams()
   const { getCourseById, updateCourse } = useCourses()
   const course = getCourseById(id)
-  const { isOwned } = usePurchases()
-  // Бесплатные программы (цена 0) открыты без покупки — например, демо-SCORM-тренинг.
-  const owned = course ? course.price === 0 || isOwned(course.id) : false
+  const { canAccessCourse } = usePurchases()
+  const { isAuthenticated } = useAuth()
+  // Материалы программы открываются только авторизованному слушателю с
+  // оплаченным заказом (бесплатные программы — сразу после входа). Гость видит
+  // только описание.
+  const owned = course ? canAccessCourse(course) : false
 
   const firstLesson = course?.modules[0]?.lessons[0]
   const [activeLesson, setActiveLesson] = useState<Lesson | undefined>(firstLesson)
@@ -187,12 +191,20 @@ export default function CourseDetailPage() {
             ) : (
               <div className="flex aspect-video flex-col items-center justify-center rounded-card border border-dashed border-ink-20 bg-ink-5 text-center">
                 <Lock width={30} height={30} className="text-ink-40" />
-                <p className="mt-4 max-w-xs text-sm text-ink-60">
-                  Материалы курса откроются после оформления доступа.
+                <p className="mt-4 max-w-sm text-sm text-ink-60">
+                  {isAuthenticated
+                    ? 'Материалы курса откроются после оплаты — здесь доступно только описание программы.'
+                    : 'Материалы курса доступны после входа в личный кабинет и оплаты — здесь доступно только описание программы.'}
                 </p>
-                <Button to={`/checkout?course=${course.id}`} size="sm" className="mt-5">
-                  Купить за {formatPrice(course.price)}
-                </Button>
+                {isAuthenticated ? (
+                  <Button to={`/checkout?course=${course.id}`} size="sm" className="mt-5">
+                    {course.price === 0 ? 'Получить доступ' : `Купить за ${formatPrice(course.price)}`}
+                  </Button>
+                ) : (
+                  <Button to="/login" state={{ from: `/courses/${course.id}` }} size="sm" className="mt-5">
+                    Войти в личный кабинет
+                  </Button>
+                )}
               </div>
             )}
           </section>
@@ -265,10 +277,26 @@ export default function CourseDetailPage() {
                   <>
                     <p className="eyebrow mb-2">Стоимость</p>
                     <p className="font-serif text-4xl font-light text-neft">{formatPrice(course.price)}</p>
-                    <p className="mt-2 text-sm text-ink-60">Полный доступ к материалам курса навсегда.</p>
-                    <Button to={`/checkout?course=${course.id}`} fullWidth size="lg" className="mt-6">
-                      <Lock width={16} height={16} /> Купить курс
-                    </Button>
+                    <p className="mt-2 text-sm text-ink-60">
+                      {isAuthenticated
+                        ? 'Полный доступ к материалам курса навсегда.'
+                        : 'Полный доступ к материалам курса навсегда — после входа и оплаты.'}
+                    </p>
+                    {isAuthenticated ? (
+                      <Button to={`/checkout?course=${course.id}`} fullWidth size="lg" className="mt-6">
+                        <Lock width={16} height={16} /> {course.price === 0 ? 'Получить доступ' : 'Купить курс'}
+                      </Button>
+                    ) : (
+                      <Button
+                        to="/login"
+                        state={{ from: `/courses/${course.id}` }}
+                        fullWidth
+                        size="lg"
+                        className="mt-6"
+                      >
+                        <Lock width={16} height={16} /> Войти и оформить доступ
+                      </Button>
+                    )}
                     <ul className="mt-6 space-y-2 text-sm text-ink-60">
                       <li className="flex gap-2"><Check width={16} height={16} className="text-ocean" /> {course.lessonsCount} уроков</li>
                       <li className="flex gap-2"><Check width={16} height={16} className="text-ocean" /> Видео, лонгриды, тренинги</li>

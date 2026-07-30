@@ -1,81 +1,95 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { getActivePaymentProvider } from '@/lib/payments'
-import type { PaymentIntent, PaymentResult, PaymentProvider } from '@/lib/payments'
-
-const paymentProvider = getActivePaymentProvider()
+import { api } from '@/api'
+import { useAuth } from '@/context/AuthContext'
+import { isFree } from '@/lib/utils'
+import type { Course } from '@/types'
 
 /**
- * Управление доступом: купленные курсы и записи на события.
- * После «оплаты» курс/событие открывается. Состояние персистится локально.
- * Платёж идёт через абстракцию PaymentProvider (см. src/lib/payments.ts).
+ * Доступ к программам.
+ *
+ * Источник истины — сервер: доступ есть только у авторизованного пользователя и
+ * только к тем программам, по которым в БД есть оплаченный заказ
+ * (GET /api/me/courses). Локально доступ не выдаётся и не хранится — гость
+ * видит только описание программы.
  */
 
-const OWNED_KEY = 'mabl.owned.courses'
 const EVENTS_KEY = 'mabl.registered.events'
-
-// Демо-слушатель уже владеет одним курсом (для наглядного прогресса в ЛК)
-const DEFAULT_OWNED = ['strategic-leadership']
 
 interface PurchaseContextValue {
   ownedCourseIds: string[]
   registeredEventIds: string[]
+  /** Загружается ли список доступных программ. */
+  loading: boolean
   isOwned: (courseId: string) => boolean
+  /**
+   * Открыты ли материалы программы: нужен вход, плюс оплаченный заказ
+   * (бесплатные программы открыты любому авторизованному слушателю).
+   */
+  canAccessCourse: (course: Pick<Course, 'id' | 'price'>) => boolean
   isRegistered: (eventId: string) => boolean
-  /** Выдать доступ к курсу (после подтверждённой оплаты на возврате/webhook). */
-  grantCourseAccess: (courseId: string) => void
-  /** Провести оплату курса и открыть доступ */
-  purchaseCourse: (intent: PaymentIntent) => Promise<PaymentResult>
-  /** Записаться на событие (с оплатой, если платное) */
-  registerEvent: (eventId: string, intent?: PaymentIntent) => Promise<PaymentResult | void>
-  paymentProvider: PaymentProvider
+  /** Перечитать доступы с сервера (например, после возврата с оплаты). */
+  refreshAccess: () => Promise<string[]>
+  /** Записаться на событие календаря. */
+  registerEvent: (eventId: string) => void
 }
 
 const PurchaseContext = createContext<PurchaseContextValue | null>(null)
 
-function loadList(key: string, fallback: string[]): string[] {
+/** Ключ записей на события — свой у каждого пользователя. */
+function eventsKey(userId: string | undefined): string {
+  return userId ? `${EVENTS_KEY}.${userId}` : EVENTS_KEY
+}
+
+function loadEvents(key: string): string[] {
   try {
     const raw = localStorage.getItem(key)
-    return raw ? (JSON.parse(raw) as string[]) : fallback
+    return raw ? (JSON.parse(raw) as string[]) : []
   } catch {
-    return fallback
+    return []
   }
 }
 
 export function PurchaseProvider({ children }: { children: ReactNode }) {
-  const [ownedCourseIds, setOwned] = useState<string[]>(() => loadList(OWNED_KEY, DEFAULT_OWNED))
-  const [registeredEventIds, setRegistered] = useState<string[]>(() => loadList(EVENTS_KEY, []))
+  const { user } = useAuth()
+  const userId = user?.id
+  const [ownedCourseIds, setOwned] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const [registeredEventIds, setRegistered] = useState<string[]>(() => loadEvents(eventsKey(undefined)))
+
+  const refreshAccess = useCallback(async (): Promise<string[]> => {
+    if (!userId) {
+      setOwned([])
+      return []
+    }
+    setLoading(true)
+    try {
+      const ids = await api.courses.myAccess()
+      setOwned(ids)
+      return ids
+    } catch {
+      setOwned([])
+      return []
+    } finally {
+      setLoading(false)
+    }
+  }, [userId])
+
+  // Список доступных программ перезагружается при входе и выходе.
+  useEffect(() => {
+    void refreshAccess()
+  }, [refreshAccess])
+
+  // Записи на события — локальные и привязаны к пользователю.
+  useEffect(() => {
+    setRegistered(loadEvents(eventsKey(userId)))
+  }, [userId])
 
   useEffect(() => {
-    localStorage.setItem(OWNED_KEY, JSON.stringify(ownedCourseIds))
-  }, [ownedCourseIds])
+    localStorage.setItem(eventsKey(userId), JSON.stringify(registeredEventIds))
+  }, [registeredEventIds, userId])
 
-  useEffect(() => {
-    localStorage.setItem(EVENTS_KEY, JSON.stringify(registeredEventIds))
-  }, [registeredEventIds])
-
-  const grantCourseAccess = (courseId: string) => {
-    setOwned((prev) => (prev.includes(courseId) ? prev : [...prev, courseId]))
-  }
-
-  const purchaseCourse = async (intent: PaymentIntent): Promise<PaymentResult> => {
-    const result = await paymentProvider.pay(intent)
-    // Для redirect-провайдеров (ЮKassa) доступ выдаётся на возврате/по webhook,
-    // а не оптимистично здесь — браузер уже уходит на платёжную форму.
-    if (result.status === 'succeeded') {
-      grantCourseAccess(intent.itemId)
-    }
-    return result
-  }
-
-  const registerEvent = async (eventId: string, intent?: PaymentIntent) => {
-    if (intent && intent.amount > 0) {
-      const result = await paymentProvider.pay(intent)
-      if (result.status === 'succeeded') {
-        setRegistered((prev) => (prev.includes(eventId) ? prev : [...prev, eventId]))
-      }
-      return result
-    }
+  const registerEvent = (eventId: string) => {
     setRegistered((prev) => (prev.includes(eventId) ? prev : [...prev, eventId]))
   }
 
@@ -83,14 +97,15 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
     () => ({
       ownedCourseIds,
       registeredEventIds,
+      loading,
       isOwned: (id) => ownedCourseIds.includes(id),
+      canAccessCourse: (course) =>
+        Boolean(userId) && (isFree(course.price) || ownedCourseIds.includes(course.id)),
       isRegistered: (id) => registeredEventIds.includes(id),
-      grantCourseAccess,
-      purchaseCourse,
+      refreshAccess,
       registerEvent,
-      paymentProvider,
     }),
-    [ownedCourseIds, registeredEventIds],
+    [ownedCourseIds, registeredEventIds, loading, refreshAccess, userId],
   )
 
   return <PurchaseContext.Provider value={value}>{children}</PurchaseContext.Provider>

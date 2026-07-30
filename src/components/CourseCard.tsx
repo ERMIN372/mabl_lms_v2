@@ -6,7 +6,7 @@ import { ArrowRight, Lock } from './ui/Icon'
 import { Badge } from './ui/Badge'
 import { courseFormatLabel } from '@/lib/labels'
 import { formatPrice, formatDuration, displayTitle, isFree, cn } from '@/lib/utils'
-import { courses } from '@/data/courses'
+import { useCourses } from '@/context/CoursesContext'
 
 interface CourseCardProps {
   course: Course
@@ -20,6 +20,7 @@ interface CourseCardProps {
  * Только бренд-палитра, без фото, градиентов и иллюстраций.
  */
 function CourseCover({ course }: { course: Course }) {
+  const { courses } = useCourses()
   // Океан — для интерактива/чтения (SCORM, лонгрид), Нефть — для видео-программ
   const isOcean = course.format === 'scorm' || course.format === 'longread'
   const number = courses.findIndex((c) => c.id === course.id) + 1

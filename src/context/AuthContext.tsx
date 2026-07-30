@@ -31,6 +31,7 @@ interface AuthContextValue {
   isAuthenticated: boolean
   isAdmin: boolean
   login: (email: string, password: string) => Promise<User>
+  register: (input: { name: string; email: string; password: string }) => Promise<User>
   logout: () => void
   recover: (email: string) => Promise<string>
 }
@@ -58,6 +59,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return account
   }
 
+  const register = async (input: { name: string; email: string; password: string }) => {
+    const account = await api.auth.register(input)
+    setUser(account)
+    return account
+  }
+
   const logout = () => {
     api.auth.logout()
     setUser(null)
@@ -71,6 +78,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: Boolean(user),
       isAdmin: user?.kind === 'admin',
       login,
+      register,
       logout,
       recover,
     }),
