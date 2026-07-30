@@ -140,10 +140,19 @@ export interface Material {
   title: string
   description: string
   type: MaterialType
+  /** Человекочитаемый объём файла («3,4 МБ»). */
   size: string
   date: string
   courseId?: string
   body?: string[]
+  /** Адрес прикреплённого файла в хранилище (Vercel Blob). */
+  fileUrl?: string
+  /** Тот же файл с принудительной отдачей на скачивание. */
+  fileDownloadUrl?: string
+  /** Исходное имя файла — подставляется в имя при сохранении. */
+  fileName?: string
+  /** Размер файла в байтах. */
+  fileSize?: number
 }
 
 export type CalendarEventType = 'Вебинар' | 'Дедлайн' | 'Мероприятие'

@@ -1,10 +1,11 @@
-import { useState } from 'react'
-import type { FormEvent } from 'react'
+import { useRef, useState } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { Input, Textarea } from '@/components/ui/Input'
 import { api } from '@/api'
 import { useAsync } from '@/hooks/useAsync'
+import { uploadFile, formatFileSize } from '@/lib/fileStore'
 import { cn } from '@/lib/utils'
 import type { Material, MaterialType } from '@/types'
 
@@ -41,6 +42,8 @@ export default function AdminMaterialEditPage() {
   const [form, setForm] = useState<Material | null>(null)
   const [bodyText, setBodyText] = useState('')
   const [error, setError] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const ready = isNew || !loading
   if (form === null && ready) {
@@ -66,6 +69,49 @@ export default function AdminMaterialEditPage() {
 
   const set = <K extends keyof Material>(key: K, value: Material[K]) =>
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev))
+
+  /** Загрузка прикреплённого файла в хранилище. */
+  const onPickFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    // Значение сбрасываем сразу: иначе повторный выбор того же файла
+    // (после ошибки) не вызовет change.
+    e.target.value = ''
+    if (!file) return
+    setError('')
+    setUploading(true)
+    try {
+      const stored = await uploadFile('materials/', file)
+      setForm((prev) =>
+        prev
+          ? {
+              ...prev,
+              fileUrl: stored.url,
+              fileDownloadUrl: stored.downloadUrl,
+              fileName: stored.name,
+              fileSize: stored.size,
+              // Объём показывается на странице материала — держим его в
+              // соответствии с реальным файлом.
+              size: formatFileSize(stored.size),
+            }
+          : prev,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить файл.')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  /**
+   * Отвязать файл от материала. Сам объект в хранилище удалит сервер при
+   * сохранении — он видит, что адрес файла изменился.
+   */
+  const detachFile = () =>
+    setForm((prev) =>
+      prev
+        ? { ...prev, fileUrl: undefined, fileDownloadUrl: undefined, fileName: undefined, fileSize: undefined }
+        : prev,
+    )
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -148,6 +194,54 @@ export default function AdminMaterialEditPage() {
             value={form.date}
             onChange={(e) => set('date', e.target.value)}
           />
+        </div>
+
+        {/* Файл материала: грузится напрямую в хранилище, ссылка сохраняется
+            вместе с материалом и отдаётся слушателю кнопкой «Скачать». */}
+        <div className="rounded-card border border-ink-10 p-5">
+          <p className="text-[0.72rem] uppercase tracking-wide text-ink-60">Файл материала</p>
+          {form.fileUrl ? (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <a
+                href={form.fileDownloadUrl ?? form.fileUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sm text-neft underline hover:text-ocean"
+              >
+                {form.fileName ?? 'Прикреплённый файл'}
+              </a>
+              {form.fileSize != null && (
+                <span className="text-[0.74rem] text-ink-40">{formatFileSize(form.fileSize)}</span>
+              )}
+              <button
+                type="button"
+                onClick={detachFile}
+                className="rounded-token px-3 py-1.5 text-[0.7rem] font-semibold uppercase tracking-wide text-ocean hover:bg-oceanc-10"
+              >
+                Открепить
+              </button>
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-ink-60">
+              Файл не прикреплён — на странице материала кнопка скачивания не показывается.
+            </p>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={onPickFile}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="mt-4"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+          >
+            {uploading ? 'Загружаем…' : form.fileUrl ? 'Заменить файл' : 'Загрузить файл'}
+          </Button>
         </div>
 
         <Input

@@ -27,6 +27,9 @@ export default function MaterialDetailPage() {
   }
 
   const course = material.courseId ? getCourseById(material.courseId) : undefined
+  // downloadUrl отдаёт файл вложением; fileUrl — запасной вариант для
+  // материалов, загруженных до появления отдельной ссылки на скачивание.
+  const downloadUrl = material.fileDownloadUrl ?? material.fileUrl
 
   return (
     <article className="py-14 md:py-20">
@@ -52,10 +55,18 @@ export default function MaterialDetailPage() {
           {material.body?.map((p, i) => <p key={i}>{p}</p>)}
         </div>
 
-        <div className="mt-10 flex flex-wrap gap-4">
-          <Button onClick={() => alert('Демо-режим: загрузка файла будет доступна в production.')}>
-            Скачать материал
-          </Button>
+        <div className="mt-10 flex flex-wrap items-center gap-4">
+          {/* Файл прикрепляется в админ-панели и лежит в хранилище (Blob).
+              Пока его нет, материал читается прямо на странице. */}
+          {downloadUrl ? (
+            <Button href={downloadUrl} download={material.fileName}>
+              Скачать материал
+            </Button>
+          ) : (
+            <p className="text-sm text-ink-60">
+              Файл для скачивания не прикреплён — материал доступен для чтения на этой странице.
+            </p>
+          )}
           {course && (
             <Button to={`/courses/${course.id}`} variant="secondary">
               К курсу «{course.title}»
