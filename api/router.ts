@@ -19,6 +19,7 @@ import type {
   NewsItem,
   Order,
   OrderStatus,
+  ProgramApplication,
   Survey,
   User,
 } from '../src/types'
@@ -80,6 +81,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // заголовка авторизации — права администратора проверяются внутри обработчика
     // по токену из clientPayload.
     path === 'scorm/blob-upload' ||
+    // Заявку на поступление оставляет любой посетитель страницы программы —
+    // авторизация здесь не требуется по определению.
+    path === 'applications' ||
     (segments[0] === 'news' && (segments[2] === 'comments' || segments[2] === 'reactions'))
   const needsAdmin = segments[0] === 'admin' || (isMutation && !isPublicMutation)
   if (needsAdmin && !requireAdmin(req, res)) return
@@ -421,6 +425,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (method === 'GET') return found(res, await getOrder(id), 'Заказ не найден')
       if (method === 'PUT') return await updateOrder(id, req, res)
       if (method === 'DELETE') return await deleteOrder(id, res)
+    }
+
+    // ---------- ЗАЯВКИ НА ПОСТУПЛЕНИЕ ----------
+    // Приём заявки — публичный (со страницы программы), просмотр и обработка —
+    // только для приёмной комиссии в админ-панели.
+    if (path === 'applications' && method === 'POST') {
+      return await createApplication(req, res)
+    }
+    if (path === 'admin/applications' && method === 'GET') {
+      return res.json(await contentList<ProgramApplication>('applications'))
+    }
+    if (segments[0] === 'admin' && segments[1] === 'applications' && segments.length === 3) {
+      const id = segments[2]
+      if (method === 'GET') {
+        return found(res, await contentGet<ProgramApplication>('applications', id), 'Заявка не найдена')
+      }
+      if (method === 'PUT' || method === 'PATCH') {
+        return res.json(await contentUpdate<ProgramApplication>('applications', id, parseBody(req)))
+      }
+      if (method === 'DELETE') {
+        await contentRemove('applications', id)
+        return res.status(204).end()
+      }
     }
 
     return res.status(404).json({ message: `Маршрут не найден: ${method} /api/${path}` })
@@ -847,6 +874,61 @@ async function deleteOrder(id: string, res: VercelResponse) {
   await ensureSchema(sql)
   await sql`DELETE FROM orders WHERE id = ${id}`
   return res.status(204).end()
+}
+
+// ---------------- заявки на поступление ----------------
+
+/**
+ * POST /api/applications — приём заявки со страницы программы.
+ *
+ * Публичный эндпоинт: имя, e-mail и телефон приходят из формы, статус и дату
+ * проставляет сервер (клиенту их доверять нельзя). Если запрос пришёл с
+ * действующим токеном сессии, заявку связываем с аккаунтом.
+ */
+async function createApplication(req: VercelRequest, res: VercelResponse) {
+  const body = parseBody(req)
+  const name = String(body.name ?? '').trim()
+  const email = String(body.email ?? '').trim().toLowerCase()
+  const phone = String(body.phone ?? '').trim()
+  const comment = String(body.comment ?? '').trim()
+  const programId = String(body.programId ?? '').trim()
+  const programTitle = String(body.programTitle ?? '').trim()
+
+  if (!name || !email || !phone) {
+    return res.status(400).json({ message: 'Укажите имя, e-mail и телефон.' })
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ message: 'Укажите корректный e-mail.' })
+  }
+  if (phone.replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ message: 'Укажите корректный номер телефона.' })
+  }
+  if (!programId) {
+    return res.status(400).json({ message: 'Не указана программа.' })
+  }
+
+  const session = verifyToken(bearer(req))
+  const application: ProgramApplication = {
+    id: `APP-${Date.now().toString(36).toUpperCase()}`,
+    programId,
+    programTitle: programTitle || programId,
+    name: name.slice(0, 200),
+    email: email.slice(0, 200),
+    phone: phone.slice(0, 50),
+    ...(comment ? { comment: comment.slice(0, 2000) } : {}),
+    status: 'new',
+    createdAt: new Date().toISOString(),
+    ...(session ? { userId: session.id } : {}),
+  }
+
+  // prepend=true — свежие заявки оказываются вверху списка в админ-панели.
+  const created = await contentCreate<ProgramApplication>(
+    'applications',
+    application,
+    'application',
+    true,
+  )
+  return res.status(201).json(created)
 }
 
 // ---------------- доступ к программам ----------------
