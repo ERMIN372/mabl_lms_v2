@@ -30,6 +30,13 @@ export interface NewDbUser {
   password: string
 }
 
+/** Строка старых демо-данных, найденная в БД. */
+export interface DemoRow {
+  section: string
+  id: string
+  title: string
+}
+
 export interface DbUserPatch {
   name?: string
   role?: string
@@ -46,6 +53,15 @@ export const databaseApi = {
     return http('/admin/db/init', { method: 'POST' })
   },
 
+  /** Найти в БД остатки старых демо-данных (без удаления). */
+  async findDemo(): Promise<{ rows: DemoRow[] }> {
+    return http<{ rows: DemoRow[] }>('/admin/db/demo')
+  },
+
+  /** Удалить найденные демо-данные. */
+  async purgeDemo(): Promise<{ deleted: number }> {
+    return http<{ deleted: number }>('/admin/db/demo/purge', { method: 'POST' })
+  },
 
   async createUser(user: NewDbUser): Promise<DbUser> {
     return http<DbUser>('/admin/db/users', { method: 'POST', body: JSON.stringify(user) })

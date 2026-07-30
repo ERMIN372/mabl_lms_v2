@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { AdminPageHeader, StatCard } from '@/components/admin/AdminUI'
 import { api } from '@/api'
-import type { DbStatus, DbUser } from '@/api/database'
+import type { DbStatus, DbUser, DemoRow } from '@/api/database'
 import { cn } from '@/lib/utils'
 
 type Notice = { tone: 'ok' | 'err'; text: string } | null
@@ -128,9 +128,83 @@ export default function AdminDatabasePage() {
                 </Button>
               }
             />
+            <div className="border-t border-ink-10" />
+            <DemoCleanup setNotice={setNotice} />
           </CardBody>
         </Card>
       </section>
+    </div>
+  )
+}
+
+/**
+ * Остатки старых демо-данных в базе: раньше сервер заливал сиды (демо-курсы,
+ * заказы, участники, уведомления, материалы, опросники, демо-аккаунт) при
+ * первом обращении. Сначала показываем найденное, удаляем только по кнопке.
+ */
+function DemoCleanup({ setNotice }: { setNotice: (n: Notice) => void }) {
+  const [rows, setRows] = useState<DemoRow[] | null>(null)
+  const [busy, setBusy] = useState<'find' | 'purge' | null>(null)
+
+  const find = async () => {
+    setBusy('find')
+    setNotice(null)
+    try {
+      const res = await api.database.findDemo()
+      setRows(res.rows)
+      if (res.rows.length === 0) setNotice({ tone: 'ok', text: 'Демо-данных в базе не найдено.' })
+    } catch (e) {
+      setNotice({ tone: 'err', text: e instanceof Error ? e.message : 'Не удалось проверить базу' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const purge = async () => {
+    if (!window.confirm(`Удалить найденные демо-записи (${rows?.length ?? 0})? Действие необратимо.`)) return
+    setBusy('purge')
+    setNotice(null)
+    try {
+      const res = await api.database.purgeDemo()
+      setRows([])
+      setNotice({ tone: 'ok', text: `Удалено демо-записей: ${res.deleted}.` })
+    } catch (e) {
+      setNotice({ tone: 'err', text: e instanceof Error ? e.message : 'Не удалось удалить демо-данные' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div>
+      <MaintenanceRow
+        title="Убрать демо-данные"
+        desc="Ищет в базе записи из старых демонстрационных сидов — демо-курсы, заказы, участников, уведомления, материалы, опросники и аккаунт demo@mabl.ru. Удаляются только они: созданное вами не затрагивается."
+        action={
+          <div className="flex gap-2">
+            <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void find()}>
+              {busy === 'find' ? 'Проверяем…' : 'Проверить'}
+            </Button>
+            {rows && rows.length > 0 && (
+              <Button size="sm" disabled={busy !== null} onClick={() => void purge()}>
+                {busy === 'purge' ? 'Удаляем…' : `Удалить (${rows.length})`}
+              </Button>
+            )}
+          </div>
+        }
+      />
+
+      {rows && rows.length > 0 && (
+        <ul className="mt-4 divide-y divide-ink-10 rounded-token border border-ink-10 text-sm">
+          {rows.map((r) => (
+            <li key={`${r.section}-${r.id}`} className="flex flex-wrap items-center gap-x-3 px-4 py-2">
+              <span className="text-[0.68rem] uppercase tracking-wide text-ink-40">{r.section}</span>
+              <span className="text-neft">{r.title || r.id}</span>
+              <span className="text-ink-40">· {r.id}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
