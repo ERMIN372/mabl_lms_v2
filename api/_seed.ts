@@ -44,6 +44,35 @@ export async function ensureSchema(sql: Sql): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `
+  // Признак подтверждённой почты появился позже таблицы users.
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE`
+  // Коды подтверждения e-mail: хранится только хеш кода.
+  await sql`
+    CREATE TABLE IF NOT EXISTS email_codes (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      email TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      attempts INT NOT NULL DEFAULT 0,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_email_codes_user ON email_codes (user_id, created_at DESC)`
+  await sql`CREATE INDEX IF NOT EXISTS idx_email_codes_email ON email_codes (email, created_at DESC)`
+  // Одноразовые ссылки для сброса пароля: хранится только хеш токена.
+  await sql`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      email TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_password_resets_email ON password_resets (email, created_at DESC)`
   await sql`
     CREATE TABLE IF NOT EXISTS news (
       id TEXT PRIMARY KEY,

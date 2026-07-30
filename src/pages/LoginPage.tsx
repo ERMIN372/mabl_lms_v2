@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AuthContext'
 
 export default function LoginPage() {
-  const { login, register, recover } = useAuth()
+  const { login, register, forgotPassword } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string })?.from || '/dashboard'
@@ -44,8 +44,10 @@ export default function LoginPage() {
     setInfo('')
     setLoading(true)
     try {
-      await register({ name, email, password })
-      navigate(from, { replace: true })
+      const { codeSent } = await register({ name, email, password })
+      // Сразу ведём на ввод кода из письма; если письмо не ушло (почта не
+      // настроена) — не задерживаем человека и пускаем дальше.
+      navigate(codeSent ? '/verify-email' : from, { replace: true, state: { from } })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать аккаунт')
     } finally {
@@ -59,7 +61,7 @@ export default function LoginPage() {
     setInfo('')
     setLoading(true)
     try {
-      const message = await recover(email)
+      const message = await forgotPassword(email)
       setInfo(message)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка восстановления')
@@ -235,7 +237,8 @@ export default function LoginPage() {
           ) : (
             <form onSubmit={submitRecover} className="mt-9 space-y-5">
               <p className="text-sm text-ink-60">
-                Укажите e-mail, привязанный к аккаунту. Мы отправим инструкцию по восстановлению.
+                Укажите e-mail, привязанный к аккаунту. Мы отправим ссылку для смены пароля —
+                она действует 60 минут.
               </p>
               <Input
                 label="E-mail"
@@ -259,7 +262,7 @@ export default function LoginPage() {
               )}
 
               <Button type="submit" fullWidth size="lg" disabled={loading}>
-                {loading ? 'Отправляем…' : 'Отправить инструкцию'}
+                {loading ? 'Отправляем…' : 'Отправить ссылку'}
               </Button>
               <button
                 type="button"

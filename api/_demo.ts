@@ -61,21 +61,21 @@ export async function findDemoRows(sql: Sql): Promise<DemoRow[]> {
   const found: DemoRow[] = []
 
   const courses = await sql`
-    SELECT id, data->>'title' AS title FROM courses WHERE id = ANY(${DEMO_IDS.courses})
+    SELECT id, data->>'title' AS title FROM courses WHERE id = ANY(${DEMO_IDS.courses}::text[])
   `
   for (const r of courses) {
     found.push({ section: 'Программы', id: r.id as string, title: (r.title as string) ?? '' })
   }
 
   const participants = await sql`
-    SELECT id, data->>'name' AS title FROM participants WHERE id = ANY(${DEMO_IDS.participants})
+    SELECT id, data->>'name' AS title FROM participants WHERE id = ANY(${DEMO_IDS.participants}::text[])
   `
   for (const r of participants) {
     found.push({ section: 'Участники', id: r.id as string, title: (r.title as string) ?? '' })
   }
 
   const orders = await sql`
-    SELECT id, data->>'courseId' AS title FROM orders WHERE id = ANY(${DEMO_IDS.orders})
+    SELECT id, data->>'courseId' AS title FROM orders WHERE id = ANY(${DEMO_IDS.orders}::text[])
   `
   for (const r of orders) {
     found.push({ section: 'Заказы', id: r.id as string, title: (r.title as string) ?? '' })
@@ -88,7 +88,7 @@ export async function findDemoRows(sql: Sql): Promise<DemoRow[]> {
   ] as const) {
     const rows = await sql`
       SELECT id, data->>'title' AS title FROM content
-      WHERE collection = ${collection} AND id = ANY(${ids})
+      WHERE collection = ${collection} AND id = ANY(${ids}::text[])
     `
     for (const r of rows) {
       found.push({ section, id: r.id as string, title: (r.title as string) ?? '' })
@@ -107,14 +107,14 @@ export async function findDemoRows(sql: Sql): Promise<DemoRow[]> {
 export async function purgeDemoRows(sql: Sql): Promise<{ deleted: number }> {
   const before = await findDemoRows(sql)
 
-  await sql`DELETE FROM courses WHERE id = ANY(${DEMO_IDS.courses})`
-  await sql`DELETE FROM participants WHERE id = ANY(${DEMO_IDS.participants})`
-  await sql`DELETE FROM orders WHERE id = ANY(${DEMO_IDS.orders})`
+  await sql`DELETE FROM courses WHERE id = ANY(${DEMO_IDS.courses}::text[])`
+  await sql`DELETE FROM participants WHERE id = ANY(${DEMO_IDS.participants}::text[])`
+  await sql`DELETE FROM orders WHERE id = ANY(${DEMO_IDS.orders}::text[])`
   await sql`
-    DELETE FROM content WHERE collection = 'notifications' AND id = ANY(${DEMO_IDS.notifications})
+    DELETE FROM content WHERE collection = 'notifications' AND id = ANY(${DEMO_IDS.notifications}::text[])
   `
-  await sql`DELETE FROM content WHERE collection = 'materials' AND id = ANY(${DEMO_IDS.materials})`
-  await sql`DELETE FROM content WHERE collection = 'surveys' AND id = ANY(${DEMO_IDS.surveys})`
+  await sql`DELETE FROM content WHERE collection = 'materials' AND id = ANY(${DEMO_IDS.materials}::text[])`
+  await sql`DELETE FROM content WHERE collection = 'surveys' AND id = ANY(${DEMO_IDS.surveys}::text[])`
   await sql`DELETE FROM users WHERE email = ${DEMO_USER_EMAIL}`
 
   return { deleted: before.length }

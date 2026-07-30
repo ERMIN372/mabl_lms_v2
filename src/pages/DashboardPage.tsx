@@ -22,7 +22,7 @@ const quickLinks = [
 ]
 
 export default function DashboardPage() {
-  const { user, isAdmin } = useAuth()
+  const { user, isAdmin, isEmailVerified } = useAuth()
   const { courses } = useCourses()
   const { canAccessCourse } = usePurchases()
   const { items } = useNotifications()
@@ -53,6 +53,22 @@ export default function DashboardPage() {
         </h1>
         <p className="mt-2 text-ink-60">Ваш прогресс обучения и ближайшие события академии.</p>
       </div>
+
+      {/* Почта не подтверждена — без этого не восстановить пароль */}
+      {!isEmailVerified && (
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-card border border-ocean/30 bg-oceanc-10 px-5 py-4">
+          <div>
+            <p className="text-sm font-semibold text-neft">Подтвердите e-mail</p>
+            <p className="mt-1 text-sm text-ink-60">
+              Адрес {user?.email} не подтверждён. Без подтверждения нельзя самостоятельно
+              восстановить пароль.
+            </p>
+          </div>
+          <Button to="/verify-email" size="sm" state={{ from: '/dashboard' }}>
+            Подтвердить
+          </Button>
+        </div>
+      )}
 
       {/* Сводка */}
       <div className="grid gap-5 sm:grid-cols-3">

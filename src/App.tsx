@@ -7,6 +7,8 @@ import { AppLayout } from './components/layout/AppLayout'
 import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
 import CheckoutPage from './pages/CheckoutPage'
+import VerifyEmailPage from './pages/VerifyEmailPage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 import CoursesPage from './pages/CoursesPage'
 import CourseDetailPage from './pages/CourseDetailPage'
 import ProgramsPage from './pages/ProgramsPage'
@@ -91,6 +93,12 @@ export default function App() {
 
         {/* Аутентификация (без общего каркаса) */}
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+        {/* Подтверждение почты — в каркасе публичных страниц */}
+        <Route element={<PublicLayout />}>
+          <Route path="/verify-email" element={<VerifyEmailPage />} />
+        </Route>
 
         {/* Личный кабинет слушателя (защищённая зона) */}
         <Route element={<AppLayout />}>
