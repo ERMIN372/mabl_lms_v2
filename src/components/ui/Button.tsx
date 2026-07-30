@@ -33,17 +33,43 @@ interface CommonProps {
   children: ReactNode
 }
 
-type ButtonAsButton = CommonProps & ButtonHTMLAttributes<HTMLButtonElement> & { to?: undefined }
+type ButtonAsButton = CommonProps &
+  ButtonHTMLAttributes<HTMLButtonElement> & { to?: undefined; href?: undefined }
 type ButtonAsLink = CommonProps & {
   to: string
+  href?: undefined
   state?: unknown
   onClick?: MouseEventHandler<HTMLAnchorElement>
 }
+/** Внешняя ссылка (файл в хранилище, документ на другом домене). */
+type ButtonAsAnchor = CommonProps & {
+  href: string
+  to?: undefined
+  download?: string | boolean
+  target?: string
+  rel?: string
+  onClick?: MouseEventHandler<HTMLAnchorElement>
+}
 
-export const Button = forwardRef<HTMLButtonElement, ButtonAsButton | ButtonAsLink>(
+export const Button = forwardRef<HTMLButtonElement, ButtonAsButton | ButtonAsLink | ButtonAsAnchor>(
   function Button(props, ref) {
     const { variant = 'primary', size = 'md', fullWidth, className, children } = props
     const classes = cn(base, variants[variant], sizes[size], fullWidth && 'w-full', className)
+
+    if (props.href) {
+      return (
+        <a
+          href={props.href}
+          download={props.download}
+          target={props.target}
+          rel={props.rel}
+          onClick={props.onClick}
+          className={classes}
+        >
+          {children}
+        </a>
+      )
+    }
 
     if ('to' in props && props.to) {
       return (
