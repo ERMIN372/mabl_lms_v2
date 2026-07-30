@@ -1,5 +1,5 @@
 import { forwardRef } from 'react'
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 
@@ -34,7 +34,11 @@ interface CommonProps {
 }
 
 type ButtonAsButton = CommonProps & ButtonHTMLAttributes<HTMLButtonElement> & { to?: undefined }
-type ButtonAsLink = CommonProps & { to: string; state?: unknown }
+type ButtonAsLink = CommonProps & {
+  to: string
+  state?: unknown
+  onClick?: MouseEventHandler<HTMLAnchorElement>
+}
 
 export const Button = forwardRef<HTMLButtonElement, ButtonAsButton | ButtonAsLink>(
   function Button(props, ref) {
@@ -43,7 +47,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonAsButton | ButtonAsLin
 
     if ('to' in props && props.to) {
       return (
-        <Link to={props.to} state={props.state} className={classes}>
+        <Link to={props.to} state={props.state} onClick={props.onClick} className={classes}>
           {children}
         </Link>
       )

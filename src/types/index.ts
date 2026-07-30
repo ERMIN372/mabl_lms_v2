@@ -270,3 +270,23 @@ export interface Order {
   /** Платёжный провайдер, через который оформлен заказ. */
   provider?: string
 }
+
+export type ApplicationStatus = 'new' | 'processing' | 'enrolled' | 'declined'
+
+/** Заявка на поступление, оставленная со страницы программы. */
+export interface ProgramApplication {
+  id: string
+  /** Идентификатор программы (`Program.id`). */
+  programId: string
+  /** Название программы на момент подачи заявки. */
+  programTitle: string
+  name: string
+  email: string
+  phone: string
+  comment?: string
+  status: ApplicationStatus
+  /** Дата подачи (ISO). */
+  createdAt: string
+  /** Аккаунт, из-под которого оставлена заявка (если пользователь авторизован). */
+  userId?: string
+}

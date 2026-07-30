@@ -2,6 +2,7 @@ import { authApi } from './auth'
 import { coursesApi } from './courses'
 import { usersApi } from './users'
 import { ordersApi } from './orders'
+import { applicationsApi } from './applications'
 import { eventsApi } from './events'
 import { newsApi } from './news'
 import { materialsApi } from './materials'
@@ -23,6 +24,7 @@ export const api = {
   courses: coursesApi,
   users: usersApi,
   orders: ordersApi,
+  applications: applicationsApi,
   events: eventsApi,
   news: newsApi,
   materials: materialsApi,
@@ -36,3 +38,4 @@ export const api = {
 
 export { API_URL, ApiError } from './config'
 export type { ScormPackage, ScormDiagnostics } from './scorm'
+export type { ApplicationDraft } from './applications'
