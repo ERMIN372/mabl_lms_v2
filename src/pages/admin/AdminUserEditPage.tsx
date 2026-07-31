@@ -86,11 +86,6 @@ export default function AdminUserEditPage() {
       }
     })
 
-  const num = (value: string) => {
-    const n = Number(value.replace(/\s/g, ''))
-    return Number.isFinite(n) ? n : 0
-  }
-
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
@@ -108,8 +103,9 @@ export default function AdminUserEditPage() {
       ...form,
       name: form.name.trim(),
       email: form.email.trim(),
-      // У администратора нет учебного прогресса и записей на программы.
-      avgProgress: isAdmin ? 0 : Math.min(100, Math.max(0, form.avgProgress)),
+      // Прогресс вычисляется на сервере по факту прохождения — в профиле не
+      // хранится. У администратора нет ни прогресса, ни записей на программы.
+      avgProgress: 0,
       enrolledCourseIds: isAdmin ? [] : form.enrolledCourseIds,
     }
 
@@ -187,19 +183,15 @@ export default function AdminUserEditPage() {
 
         {form.role === 'student' && (
           <>
-            <Input
-              label="Средний прогресс, % (0–100)"
-              type="number"
-              min={0}
-              max={100}
-              value={String(form.avgProgress)}
-              onChange={(e) => set('avgProgress', num(e.target.value))}
-            />
-
             <div>
               <span className="mb-2 block text-[0.72rem] uppercase tracking-wide text-ink-60">
                 Записан на программы
               </span>
+              <p className="mb-2 text-[0.78rem] text-ink-60">
+                Отметка вручную — в дополнение к оплаченным заказам и программам, которые
+                слушатель уже начал. Прогресс считается по факту прохождения и здесь не
+                редактируется.
+              </p>
               {courses.length > 0 ? (
                 <div className="grid gap-2 rounded-card border border-ink-10 p-4 sm:grid-cols-2">
                   {courses.map((c) => (

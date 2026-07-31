@@ -1,13 +1,19 @@
 import { scormStore } from '@/lib/scormStore'
-import type {
-  ScormPackage,
-  UploadProgress,
-  ScormBlobStatus,
-  ScormProbe,
-  ScormLastError,
-} from '@/lib/scormStore'
+import type { ScormPackage, UploadProgress } from '@/lib/scormStore'
+import { http } from '@/api/config'
 
-export type { ScormPackage, ScormProbe, ScormBlobStatus, ScormLastError } from '@/lib/scormStore'
+export type { ScormPackage } from '@/lib/scormStore'
+
+/** Результат серверной диагностики пакета (см. api/router.ts). */
+export interface ScormDiagnostics {
+  id: string
+  mode: 'token' | 'oidc' | 'none'
+  fileCount: number
+  okCount: number
+  failed: Array<{ path: string; sizeKb: number; via: string; status: number | string }>
+  listError?: string
+  tookMs: number
+}
 
 /**
  * Ресурс «SCORM-пакеты».
@@ -23,23 +29,20 @@ export const scormApi = {
     return scormStore.list()
   },
 
-  async status(): Promise<ScormBlobStatus> {
-    return scormStore.status()
-  },
-
-  async probe(): Promise<ScormProbe[]> {
-    return scormStore.probe()
-  },
-
-  async lastError(): Promise<ScormLastError> {
-    return scormStore.lastError()
-  },
-
-  async upload(file: File, onProgress?: UploadProgress): Promise<ScormPackage> {
-    return scormStore.upload(file, onProgress)
+  async upload(
+    file: File,
+    onProgress?: UploadProgress,
+    confirmReplace?: (id: string) => boolean,
+  ): Promise<ScormPackage> {
+    return scormStore.upload(file, onProgress, confirmReplace)
   },
 
   async remove(id: string): Promise<void> {
     return scormStore.remove(id)
+  },
+
+  /** Проверить на сервере, какие файлы пакета реально отдаются. */
+  async diagnose(id: string): Promise<ScormDiagnostics> {
+    return http<ScormDiagnostics>(`/scorm/${encodeURIComponent(id)}/diagnose`)
   },
 }

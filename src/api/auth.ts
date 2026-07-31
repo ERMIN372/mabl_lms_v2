@@ -17,6 +17,17 @@ export const authApi = {
     return user
   },
 
+  /** Регистрация слушателя: аккаунт нужен для покупки и доступа к программам. */
+  async register(input: { name: string; email: string; password: string }): Promise<User> {
+    const res = await http<User & { token?: string }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+    if (res.token) setToken(res.token)
+    const { token: _token, ...user } = res
+    return user
+  },
+
   async recover(email: string): Promise<string> {
     return http<{ message: string }>('/auth/recover', {
       method: 'POST',

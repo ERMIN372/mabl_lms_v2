@@ -9,17 +9,11 @@ import { formatPrice } from '@/lib/utils'
 
 /** Админ-панель: управление каталогом программ (список + действия). */
 export default function AdminCoursesPage() {
-  const { courses, deleteCourse, resetCourses } = useCourses()
+  const { courses, deleteCourse } = useCourses()
 
   const onDelete = (id: string, title: string) => {
     if (window.confirm(`Удалить программу «${title}»? Действие необратимо.`)) {
       deleteCourse(id)
-    }
-  }
-
-  const onReset = () => {
-    if (window.confirm('Вернуть каталог к исходным демо-данным? Все правки будут потеряны.')) {
-      resetCourses()
     }
   }
 
@@ -29,14 +23,9 @@ export default function AdminCoursesPage() {
         title="Программы академии"
         description={`Всего программ: ${courses.length}. Создавайте, редактируйте и удаляйте курсы каталога.`}
         actions={
-          <>
-            <Button onClick={onReset} variant="secondary" size="sm">
-              Сбросить демо-данные
-            </Button>
-            <Button to="/admin/courses/new" size="sm">
-              + Добавить программу
-            </Button>
-          </>
+          <Button to="/admin/courses/new" size="sm">
+            + Добавить программу
+          </Button>
         }
       />
 
@@ -94,11 +83,8 @@ export default function AdminCoursesPage() {
             <Grid width={24} height={24} />
           </span>
           <p className="mt-4 font-serif text-xl text-neft">В каталоге пока нет программ</p>
-          <p className="mt-2 text-ink-60">Добавьте первую программу или восстановите демо-данные.</p>
-          <div className="mt-6 flex justify-center gap-2">
-            <Button onClick={onReset} variant="secondary" size="sm">
-              Восстановить демо-данные
-            </Button>
+          <p className="mt-2 text-ink-60">Добавьте первую программу — она сразу появится в каталоге.</p>
+          <div className="mt-6 flex justify-center">
             <Button to="/admin/courses/new" size="sm">
               + Добавить программу
             </Button>

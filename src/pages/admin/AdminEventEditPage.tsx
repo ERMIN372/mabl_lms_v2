@@ -187,7 +187,7 @@ export default function AdminEventEditPage() {
               label="Спикер"
               value={form.speaker ?? ''}
               onChange={(e) => set('speaker', e.target.value)}
-              placeholder="проф. Анна Корецкая"
+              placeholder="Имя спикера"
             />
 
             <div className="grid gap-6 sm:grid-cols-2">

@@ -70,6 +70,10 @@ export interface Lesson {
   title: string
   format: CourseFormat
   duration: string
+  /**
+   * Устаревшее поле: прохождение общим для всех слушателей быть не может.
+   * Осталось в сохранённых программах; интерфейс берёт признак из LessonProgress.
+   */
   completed?: boolean
   /** URL точки входа SCORM-пакета (res/index.html) для интерактивных уроков. */
   launchUrl?: string
@@ -89,15 +93,45 @@ export interface Course {
   format: CourseFormat
   level: CourseLevel
   instructor: string
+  /** Куратор кафедры, отвечающий за программу. */
+  curator?: string
   durationHours: number
   lessonsCount: number
   price: number
-  /** Прогресс в процентах (0–100) */
+  /**
+   * Прогресс по умолчанию (0–100) — общий для программы. Реальное прохождение
+   * персонально у каждого слушателя и хранится отдельно (см. LessonProgress).
+   */
   progress: number
   modules: CourseModule[]
   /** id связанного опросника, если есть */
   surveyId?: string
   tags: string[]
+}
+
+/**
+ * Прохождение одного урока одним слушателем.
+ *
+ * Прогресс считается персонально (в отличие от Course.progress, общего для
+ * программы): у каждого слушателя своя строка на каждый начатый урок.
+ */
+export interface LessonProgress {
+  courseId: string
+  lessonId: string
+  /** Прогресс прохождения урока, 0–100. */
+  progress: number
+  completed: boolean
+  /** Статус SCORM (completed / passed / incomplete / …) — для уроков-тренингов. */
+  status?: string
+  /** Балл, приведённый к шкале 0–100. */
+  score?: number
+  /**
+   * Снимок модели данных SCORM (`cmi.*`), включая cmi.suspend_data. С ним
+   * тренинг продолжается с места остановки на любом устройстве.
+   */
+  cmi?: Record<string, string>
+  /** Момент последнего изменения, ISO. */
+  updatedAt: string
 }
 
 export type NewsCategory = 'Академия' | 'Вебинары' | 'Курсы' | 'События'
@@ -138,10 +172,19 @@ export interface Material {
   title: string
   description: string
   type: MaterialType
+  /** Человекочитаемый объём файла («3,4 МБ»). */
   size: string
   date: string
   courseId?: string
   body?: string[]
+  /** Адрес прикреплённого файла в хранилище (Vercel Blob). */
+  fileUrl?: string
+  /** Тот же файл с принудительной отдачей на скачивание. */
+  fileDownloadUrl?: string
+  /** Исходное имя файла — подставляется в имя при сохранении. */
+  fileName?: string
+  /** Размер файла в байтах. */
+  fileSize?: number
 }
 
 export type CalendarEventType = 'Вебинар' | 'Дедлайн' | 'Мероприятие'
@@ -267,4 +310,24 @@ export interface Order {
   paymentId?: string
   /** Платёжный провайдер, через который оформлен заказ. */
   provider?: string
+}
+
+export type ApplicationStatus = 'new' | 'processing' | 'enrolled' | 'declined'
+
+/** Заявка на поступление, оставленная со страницы программы. */
+export interface ProgramApplication {
+  id: string
+  /** Идентификатор программы (`Program.id`). */
+  programId: string
+  /** Название программы на момент подачи заявки. */
+  programTitle: string
+  name: string
+  email: string
+  phone: string
+  comment?: string
+  status: ApplicationStatus
+  /** Дата подачи (ISO). */
+  createdAt: string
+  /** Аккаунт, из-под которого оставлена заявка (если пользователь авторизован). */
+  userId?: string
 }

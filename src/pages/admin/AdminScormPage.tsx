@@ -5,10 +5,57 @@ import { Button } from '@/components/ui/Button'
 import { ArrowUpRight, Clipboard } from '@/components/ui/Icon'
 import { AdminPageHeader } from '@/components/admin/AdminUI'
 import { api } from '@/api'
-import type { ScormPackage, ScormProbe, ScormBlobStatus, ScormLastError } from '@/api'
+import type { ScormPackage, ScormDiagnostics } from '@/api'
+import { repoScormPackages, repoScormLaunchUrl } from '@/data/scormPackages'
 import { useCourses } from '@/context/CoursesContext'
 import { formatDateTime } from '@/lib/utils'
 import type { Course } from '@/types'
+
+/** Наглядный вывод серверной диагностики пакета. */
+function DiagnosticsPanel({ report }: { report: ScormDiagnostics }) {
+  const allOk = !report.listError && report.failed.length === 0 && report.fileCount > 0
+  return (
+    <div className="mt-2 rounded-token border border-ink-10 bg-ink-5 px-4 py-3 text-sm">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-ink-70">
+        <span>
+          Авторизация хранилища: <b>{report.mode === 'none' ? 'нет' : report.mode.toUpperCase()}</b>
+        </span>
+        <span>
+          Файлов: <b>{report.fileCount}</b>, доступно: <b>{report.okCount}</b>, ошибок:{' '}
+          <b className={report.failed.length ? 'text-ocean' : ''}>{report.failed.length}</b>
+        </span>
+        <span className="text-ink-50">({report.tookMs} мс)</span>
+      </div>
+
+      {report.listError && (
+        <p className="mt-2 font-semibold text-ocean">
+          Не удалось получить список файлов из хранилища: {report.listError}
+        </p>
+      )}
+
+      {allOk && (
+        <p className="mt-2 font-semibold text-emerald-600">
+          Все файлы пакета отдаются сервером. Если курс не открывается — очистите кэш
+          (Ctrl+Shift+R) или отключите service worker.
+        </p>
+      )}
+
+      {report.failed.length > 0 && (
+        <div className="mt-2">
+          <p className="mb-1 font-semibold text-ocean">Не отдаются:</p>
+          <ul className="space-y-0.5 font-mono text-[0.72rem] text-ink-70">
+            {report.failed.slice(0, 20).map((f: ScormDiagnostics['failed'][number]) => (
+              <li key={f.path}>
+                {f.path} — {f.sizeKb} КБ — {f.via} — статус {String(f.status)}
+              </li>
+            ))}
+            {report.failed.length > 20 && <li>…ещё {report.failed.length - 20}</li>}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
 
 /** Загрузка и управление SCORM-пакетами. */
 export default function AdminScormPage() {
@@ -19,29 +66,9 @@ export default function AdminScormPage() {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [creatingId, setCreatingId] = useState<string | null>(null)
   const [error, setError] = useState('')
-  const [blobReady, setBlobReady] = useState<boolean | null>(null)
-  const [health, setHealth] = useState<Record<string, ScormProbe>>({})
-  const [blobStatus, setBlobStatus] = useState<ScormBlobStatus | null>(null)
-  const [lastError, setLastError] = useState<ScormLastError | null>(null)
-  const [checking, setChecking] = useState(false)
+  // Результаты серверной диагностики пакета: id → отчёт (или 'loading').
+  const [diag, setDiag] = useState<Record<string, ScormDiagnostics | 'loading'>>({})
   const fileRef = useRef<HTMLInputElement>(null)
-
-  const runDiagnostics = async () => {
-    setChecking(true)
-    try {
-      const [status, probes, last] = await Promise.all([
-        api.scorm.status(),
-        api.scorm.probe(),
-        api.scorm.lastError(),
-      ])
-      setBlobStatus(status)
-      setBlobReady(status.configured)
-      setHealth(Object.fromEntries(probes.map((p) => [p.id, p])))
-      setLastError(last)
-    } finally {
-      setChecking(false)
-    }
-  }
 
   const uploadLabel = busy
     ? progress
@@ -49,11 +76,15 @@ export default function AdminScormPage() {
       : 'Загрузка…'
     : '+ Загрузить SCORM (.zip)'
 
-  const refresh = async () => setPackages(await api.scorm.list())
+  // Доступность файлов пакета не проверяем автоматически на каждой загрузке
+  // страницы — это лишние обращения к раздаче. Для проверки есть кнопка
+  // «Диагностика» у каждого пакета.
+  const refresh = async () => {
+    setPackages(await api.scorm.list())
+  }
 
   useEffect(() => {
     refresh()
-    runDiagnostics()
   }, [])
 
   const onUpload = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -63,9 +94,17 @@ export default function AdminScormPage() {
     setProgress(null)
     setError('')
     try {
-      await api.scorm.upload(file, (done, total) => setProgress({ done, total }))
+      await api.scorm.upload(
+        file,
+        (done, total) => setProgress({ done, total }),
+        (id) =>
+          window.confirm(
+            `Пакет «${id}» уже загружен. Заменить его файлы новой версией? ` +
+              'Курсы, использующие пакет, продолжат работать с обновлёнными материалами. ' +
+              'Нажмите «Отмена», чтобы сохранить как отдельный новый пакет.',
+          ),
+      )
       await refresh()
-      await runDiagnostics()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить пакет')
     } finally {
@@ -75,23 +114,26 @@ export default function AdminScormPage() {
     }
   }
 
-  const onCreateCourse = async (pkg: ScormPackage) => {
+  const onCreateCourse = async (pkg: { id: string; title: string; launchUrl: string }) => {
     if (creatingId) return
     setError('')
     setCreatingId(pkg.id)
     const draft: Course = {
       id: '',
       title: pkg.title,
-      subtitle: 'Интерактивный SCORM-тренинг',
-      description: 'Загруженный SCORM-пакет. Отредактируйте описание программы при необходимости.',
+      subtitle: 'Интерактивный тренинг',
+      // Описание и куратор заполняются администратором на странице редактирования,
+      // куда происходит переход сразу после создания курса.
+      description: '',
       format: 'scorm',
       level: 'Базовый',
       instructor: 'МАБЛ',
+      curator: '',
       durationHours: 1,
       lessonsCount: 1,
       price: 0,
       progress: 0,
-      tags: ['SCORM', 'Тренинг'],
+      tags: ['Тренинг'],
       modules: [
         {
           id: 'm1',
@@ -118,11 +160,25 @@ export default function AdminScormPage() {
     }
   }
 
+  const onDiagnose = async (pkg: ScormPackage) => {
+    setDiag((d) => ({ ...d, [pkg.id]: 'loading' }))
+    try {
+      const report = await api.scorm.diagnose(pkg.id)
+      setDiag((d) => ({ ...d, [pkg.id]: report }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось выполнить диагностику')
+      setDiag((d) => {
+        const next = { ...d }
+        delete next[pkg.id]
+        return next
+      })
+    }
+  }
+
   const onRemove = async (pkg: ScormPackage) => {
     if (window.confirm(`Удалить пакет «${pkg.title}»? Курсы со ссылкой на него перестанут работать.`)) {
       await api.scorm.remove(pkg.id)
       await refresh()
-      await runDiagnostics()
     }
   }
 
@@ -130,7 +186,7 @@ export default function AdminScormPage() {
     <div>
       <AdminPageHeader
         title="SCORM-пакеты"
-        description="Загрузите .zip с SCORM-пакетом (1.2). Пакет распаковывается и становится доступен для подключения к программе."
+        description="Пакеты из репозитория раздаются напрямую и не расходуют лимиты хранилища. Загрузка .zip через админку кладёт пакет в облачное хранилище — удобно, но расходует лимиты плана."
         actions={
           <>
             <input
@@ -147,21 +203,65 @@ export default function AdminScormPage() {
         }
       />
 
-      {blobReady === false && (
-        <div className="mt-6 rounded-token border border-amber-400/50 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          <p className="font-semibold">Хранилище файлов не подключено</p>
-          <p className="mt-1">
-            Загрузка SCORM недоступна: в проекте Vercel не подключено Blob-хранилище. Откройте проект
-            на Vercel → <span className="font-medium">Storage → Create → Blob → Connect</span>, затем
-            сделайте <span className="font-medium">Redeploy</span>.
-          </p>
-        </div>
-      )}
-
       {error && (
         <div className="mt-6 rounded-token border border-ocean/40 bg-oceanc-10 px-4 py-3 text-sm text-ocean">
           {error}
         </div>
+      )}
+
+      {/* Пакеты, лежащие в репозитории: раздаются статикой, без хранилища и
+          лимитов операций — основной способ публикации на бесплатном плане. */}
+      {repoScormPackages.length > 0 && (
+        <section className="mt-8">
+          <h2 className="font-serif text-xl text-neft">Пакеты в репозитории</h2>
+          <p className="mt-1 text-sm text-ink-60">
+            Раздаются напрямую, без облачного хранилища: не расходуют лимиты и не могут быть
+            приостановлены. Чтобы добавить новый — передайте .zip разработчику, он положит пакет
+            в репозиторий.
+          </p>
+          <div className="mt-4 overflow-hidden rounded-card border border-ink-10">
+            <ul className="divide-y divide-ink-10">
+              {repoScormPackages.map((pkg) => {
+                const launchUrl = repoScormLaunchUrl(pkg)
+                return (
+                  <li
+                    key={pkg.id}
+                    className="grid grid-cols-1 gap-3 px-5 py-4 md:grid-cols-12 md:items-center md:gap-4"
+                  >
+                    <div className="min-w-0 md:col-span-8">
+                      <p className="truncate font-serif text-lg text-neft">{pkg.title}</p>
+                      <p className="text-[0.74rem] text-ink-60">
+                        {pkg.fileCount} файлов · {launchUrl}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1 md:col-span-4 md:flex-nowrap md:justify-end">
+                      <a
+                        href={launchUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-token px-3 py-2 text-[0.7rem] font-semibold uppercase tracking-wide text-ink-60 hover:bg-ink-5 hover:text-neft"
+                      >
+                        Открыть <ArrowUpRight width={14} height={14} />
+                      </a>
+                      <Button
+                        onClick={() => onCreateCourse({ id: pkg.id, title: pkg.title, launchUrl })}
+                        variant="ghost"
+                        size="sm"
+                        disabled={creatingId !== null}
+                      >
+                        {creatingId === pkg.id ? 'Создаём…' : 'Создать курс'}
+                      </Button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        </section>
+      )}
+
+      {packages.length > 0 && (
+        <h2 className="mt-10 font-serif text-xl text-neft">Загруженные через админку</h2>
       )}
 
       {packages.length > 0 ? (
@@ -179,10 +279,7 @@ export default function AdminScormPage() {
               >
                 <div className="min-w-0 md:col-span-5">
                   <p className="truncate font-serif text-lg text-neft">{pkg.title}</p>
-                  <p className="flex items-center gap-2 text-[0.74rem] text-ink-60">
-                    <span>{pkg.fileCount} файлов</span>
-                    <HealthBadge probe={health[pkg.id]} />
-                  </p>
+                  <p className="text-[0.74rem] text-ink-60">{pkg.fileCount} файлов</p>
                 </div>
                 <div className="text-sm text-ink-60 md:col-span-3">{formatDateTime(pkg.uploadedAt)}</div>
                 <div className="flex flex-wrap gap-1 md:col-span-4 md:flex-nowrap md:justify-end">
@@ -202,6 +299,14 @@ export default function AdminScormPage() {
                   >
                     {creatingId === pkg.id ? 'Создаём…' : 'Создать курс'}
                   </Button>
+                  <Button
+                    onClick={() => onDiagnose(pkg)}
+                    variant="ghost"
+                    size="sm"
+                    disabled={diag[pkg.id] === 'loading'}
+                  >
+                    {diag[pkg.id] === 'loading' ? 'Проверяем…' : 'Диагностика'}
+                  </Button>
                   <button
                     onClick={() => onRemove(pkg)}
                     className="whitespace-nowrap rounded-token px-3 py-2 text-[0.7rem] font-semibold uppercase tracking-wide text-ocean hover:bg-oceanc-10"
@@ -209,6 +314,12 @@ export default function AdminScormPage() {
                     Удалить
                   </button>
                 </div>
+
+                {diag[pkg.id] && diag[pkg.id] !== 'loading' && (
+                  <div className="md:col-span-12">
+                    <DiagnosticsPanel report={diag[pkg.id] as ScormDiagnostics} />
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -225,87 +336,6 @@ export default function AdminScormPage() {
           </Button>
         </div>
       )}
-
-      {/* Диагностика хранилища — видно, какой пакет здоров и в чём ошибка. */}
-      <div className="mt-10 rounded-card border border-ink-10 bg-ink-5/40 p-5">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="font-serif text-lg text-neft">Диагностика хранилища</h2>
-          <button
-            onClick={runDiagnostics}
-            disabled={checking}
-            className="rounded-token px-3 py-1.5 text-[0.7rem] font-semibold uppercase tracking-wide text-ink-60 hover:bg-ink-5 hover:text-neft disabled:opacity-50"
-          >
-            {checking ? 'Проверяю…' : 'Проверить снова'}
-          </button>
-        </div>
-
-        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-          <span className="text-ink-60">Хранилище Vercel Blob:</span>
-          {blobStatus?.configured ? (
-            <span className="font-medium text-emerald-600">подключено ✓</span>
-          ) : (
-            <span className="font-medium text-ocean">не подключено ✗</span>
-          )}
-          {blobStatus?.tokens && blobStatus.tokens.length > 0 && (
-            <span className="text-[0.74rem] text-ink-40">
-              (переменные: {blobStatus.tokens.join(', ')})
-            </span>
-          )}
-        </div>
-
-        {packages.length > 0 && (
-          <ul className="mt-3 space-y-1.5 text-sm">
-            {packages.map((pkg) => {
-              const probe = health[pkg.id]
-              const ok = probe?.status === 200
-              return (
-                <li key={pkg.id} className="flex flex-wrap items-center gap-2">
-                  <span className={ok ? 'text-emerald-600' : 'text-ocean'}>{ok ? '✓' : '✗'}</span>
-                  <span className="truncate text-neft">{pkg.title}</span>
-                  {probe && !ok && (
-                    <span className="text-[0.74rem] text-ocean">
-                      launch-файл недоступен (
-                      {probe.status === -1 ? 'сетевой сбой' : `HTTP ${probe.status}`}) — перезалейте
-                      пакет
-                    </span>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-        )}
-
-        {lastError?.message ? (
-          <div className="mt-4">
-            <p className="text-[0.72rem] font-semibold uppercase tracking-wide text-ink-60">
-              Последняя серверная ошибка
-              {lastError.at ? ` · ${formatDateTime(lastError.at)}` : ''}
-            </p>
-            <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-token border border-ink-10 bg-wisdom p-3 text-[0.72rem] leading-relaxed text-ink-80">
-              {lastError.message}
-            </pre>
-          </div>
-        ) : (
-          <p className="mt-4 text-[0.74rem] text-ink-40">Серверных ошибок не зафиксировано.</p>
-        )}
-      </div>
     </div>
-  )
-}
-
-/** Бейдж состояния пакета: доступен ли его launch-файл. */
-function HealthBadge({ probe }: { probe?: ScormProbe }) {
-  if (!probe) return null
-  if (probe.status === 200) {
-    return (
-      <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[0.66rem] font-semibold uppercase tracking-wide text-emerald-600">
-        Доступен
-      </span>
-    )
-  }
-  return (
-    <span className="rounded-full bg-oceanc-10 px-2 py-0.5 text-[0.66rem] font-semibold uppercase tracking-wide text-ocean">
-      Проблема · {probe.status === -1 ? 'сеть' : `HTTP ${probe.status}`}
-    </span>
   )
 }

@@ -30,6 +30,27 @@ export interface NewDbUser {
   password: string
 }
 
+/** Строка старых демо-данных, найденная в БД. */
+export interface DemoRow {
+  section: string
+  id: string
+  title: string
+}
+
+/** Результат инициализации базы. */
+export interface InitResult {
+  ok: boolean
+  counts: { courses: number; users: number }
+  /** Создан ли аккаунт администратора этим вызовом. */
+  adminCreated: boolean
+  adminEmail: string
+  /**
+   * Сгенерированный пароль администратора — приходит один раз и только если
+   * аккаунт создан прямо сейчас, а ADMIN_PASSWORD не задан в окружении.
+   */
+  adminPassword?: string
+}
+
 export interface DbUserPatch {
   name?: string
   role?: string
@@ -42,12 +63,18 @@ export const databaseApi = {
     return http<DbStatus>('/admin/db')
   },
 
-  async init(): Promise<{ ok: boolean; counts: { courses: number; users: number } }> {
-    return http('/admin/db/init', { method: 'POST' })
+  async init(): Promise<InitResult> {
+    return http<InitResult>('/admin/db/init', { method: 'POST' })
   },
 
-  async resetCourses(): Promise<unknown> {
-    return http('/admin/db/reset-courses', { method: 'POST' })
+  /** Найти в БД остатки старых демо-данных (без удаления). */
+  async findDemo(): Promise<{ rows: DemoRow[] }> {
+    return http<{ rows: DemoRow[] }>('/admin/db/demo')
+  },
+
+  /** Удалить найденные демо-данные. */
+  async purgeDemo(): Promise<{ deleted: number }> {
+    return http<{ deleted: number }>('/admin/db/demo/purge', { method: 'POST' })
   },
 
   async createUser(user: NewDbUser): Promise<DbUser> {

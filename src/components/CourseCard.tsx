@@ -6,7 +6,8 @@ import { ArrowRight, Lock } from './ui/Icon'
 import { Badge } from './ui/Badge'
 import { courseFormatLabel } from '@/lib/labels'
 import { formatPrice, formatDuration, displayTitle, isFree, cn } from '@/lib/utils'
-import { courses } from '@/data/courses'
+import { useCourses } from '@/context/CoursesContext'
+import { useProgress } from '@/context/ProgressContext'
 
 interface CourseCardProps {
   course: Course
@@ -20,6 +21,7 @@ interface CourseCardProps {
  * Только бренд-палитра, без фото, градиентов и иллюстраций.
  */
 function CourseCover({ course }: { course: Course }) {
+  const { courses } = useCourses()
   // Океан — для интерактива/чтения (SCORM, лонгрид), Нефть — для видео-программ
   const isOcean = course.format === 'scorm' || course.format === 'longread'
   const number = courses.findIndex((c) => c.id === course.id) + 1
@@ -60,6 +62,11 @@ function CourseCover({ course }: { course: Course }) {
 
 /** Карточка курса для каталога и дашборда. */
 export function CourseCard({ course, owned }: CourseCardProps) {
+  // Прогресс персональный: у каждого слушателя свой (Course.progress — общее
+  // свойство программы и прохождение не отражает).
+  const { courseProgress } = useProgress()
+  const progress = courseProgress(course)
+
   return (
     <article className="group flex flex-col rounded-card border border-ink-10 bg-wisdom transition-colors duration-200 hover:border-ink-40">
       <CourseCover course={course} />
@@ -81,9 +88,9 @@ export function CourseCard({ course, owned }: CourseCardProps) {
 
         {owned ? (
           <div className="space-y-4">
-            <ProgressBar value={course.progress} showLabel />
+            <ProgressBar value={progress} showLabel />
             <Button to={`/courses/${course.id}`} variant="secondary" size="sm" fullWidth>
-              {course.progress > 0 ? 'Продолжить' : 'Начать обучение'}
+              {progress > 0 ? 'Продолжить' : 'Начать обучение'}
               <ArrowRight width={16} height={16} />
             </Button>
           </div>

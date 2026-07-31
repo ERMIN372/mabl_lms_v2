@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prebuild": "node scripts/normalize-scorm.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

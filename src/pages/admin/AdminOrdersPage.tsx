@@ -39,13 +39,6 @@ export default function AdminOrdersPage() {
     }
   }
 
-  const onReset = async () => {
-    if (window.confirm('Вернуть список заказов к исходным демо-данным? Все правки будут потеряны.')) {
-      await api.orders.reset()
-      reload()
-    }
-  }
-
   const orders = useMemo(() => ordersData ?? [], [ordersData])
   const userById = useMemo(
     () => new Map((usersData ?? []).map((u) => [u.id, u])),
@@ -73,14 +66,9 @@ export default function AdminOrdersPage() {
         title="Заказы"
         description="История покупок программ участниками: суммы, способы оплаты и статусы."
         actions={
-          <>
-            <Button onClick={onReset} variant="secondary" size="sm">
-              Сбросить демо-данные
-            </Button>
-            <Button to="/admin/orders/new" size="sm">
-              + Добавить заказ
-            </Button>
-          </>
+          <Button to="/admin/orders/new" size="sm">
+            + Добавить заказ
+          </Button>
         }
       />
 

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="8316ad1b-2fdd-47fd-8598-621b3e07f1c7" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:lom="http://www.imsglobal.org/xsd/imsmd_rootv1p2p1" xsi:schemaLocation="http://www.imsproject.org/xsd/imscp_rootv1p1p2 imscp_rootv1p1p2.xsd http://www.imsglobal.org/xsd/imsmd_rootv1p2p1 imsmd_rootv1p2p1.xsd http://www.adlnet.org/xsd/adlcp_rootv1p2 adlcp_rootv1p2.xsd">
+    <metadata>
+        <schema>ADL SCORM</schema>
+        <schemaversion>1.2</schemaversion>
+        <lom:lom>
+            <lom:general>
+                <lom:title>
+                    <lom:langstring>Когнитивистика и развитие мышления</lom:langstring>
+                </lom:title>
+            </lom:general>
+        </lom:lom>
+    </metadata>
+    <organizations default="ade16b56-79ee-11f1-b0f8-52d455a634c2_org">
+        <organization identifier="ade16b56-79ee-11f1-b0f8-52d455a634c2_org">
+            <title>Когнитивистика и развитие мышления</title>
+            <item identifier="ade16b56-79ee-11f1-b0f8-52d455a634c2" identifierref="resource">
+                <title>Когнитивистика и развитие мышления</title>
+            </item>
+        </organization>
+    </organizations>
+    <resources>
+        <resource identifier="resource" type="webcontent" adlcp:scormtype="sco" href="res/index.html">
+            <file href="res/js/fast-average-color-7.1.0.umd.js"></file>
+            <file href="res/js/focus-visible-5.2.0.iife.js"></file>
+            <file href="res/js/hls.js-1.6.2.umd.js"></file>
+            <file href="res/js/hyperhtml-2.34.2.umd.js"></file>
+            <file href="res/js/immer-6.0.9.umd.js"></file>
+            <file href="res/js/luxon-3.4.4.umd.js"></file>
+            <file href="res/js/output.min.js"></file>
+            <file href="res/js/posthog-js-1.335.3.esm.js"></file>
+            <file href="res/js/protobufjs-6.8.8.umd.js"></file>
+            <file href="res/js/react-19.2.3.umd.js"></file>
+            <file href="res/js/react-dom-19.2.3.umd.js"></file>
+            <file href="res/js/reatom-v1-1.1.5.umd.js"></file>
+            <file href="res/js/res/EmptyStateLock-VQU27NML.png"></file>
+            <file href="res/js/res/EmptyStatePreFilledImage-MIFR5ML7.svg"></file>
+            <file href="res/js/res/default_background-WLUHEOYW.png"></file>
+            <file href="res/styles/bundle.css"></file>
+            <file href="res/styles/fonts/jb-mono-bold-italic_75ca6e40.woff"></file>
+            <file href="res/styles/fonts/jb-mono-bold_98303ebd.woff"></file>
+            <file href="res/styles/fonts/jb-mono-regular-italic_d49a26b5.woff"></file>
+            <file href="res/styles/fonts/jb-mono-regular_8c33f3c.woff"></file>
+            <file href="res/styles/fonts/roboto-bold-italic_da1a3932.woff2"></file>
+            <file href="res/styles/fonts/roboto-bold_3a4bac1d.woff2"></file>
+            <file href="res/styles/fonts/roboto-medium-italic_f3e02675.woff2"></file>
+            <file href="res/styles/fonts/roboto-medium_513df3a1.woff2"></file>
+            <file href="res/styles/fonts/roboto-regular-italic_b3e37f46.woff2"></file>
+            <file href="res/styles/fonts/roboto-regular_da6cc2e.woff2"></file>
+            <file href="res/styles/res/FallbackTile_88eb17b.svg"></file>
+            <file href="res/styles/res/arrow-icon-left_9424b54a.svg"></file>
+            <file href="res/styles/res/arrow-icon-right_4bfe2449.svg"></file>
+            <file href="res/styles/res/default-background-image_301b2040.svg"></file>
+            <file href="res/styles/res/watermark-logo_9d0cfd7e.svg"></file>
+            <file href="res/unsupportedBrowser/fonts/fonts.css"></file>
+            <file href="res/unsupportedBrowser/fonts/roboto-bold-italic.woff2"></file>
+            <file href="res/unsupportedBrowser/fonts/roboto-bold.woff2"></file>
+            <file href="res/unsupportedBrowser/fonts/roboto-medium-italic.woff2"></file>
+            <file href="res/unsupportedBrowser/fonts/roboto-medium.woff2"></file>
+            <file href="res/unsupportedBrowser/fonts/roboto-regular-italic.woff2"></file>
+            <file href="res/unsupportedBrowser/fonts/roboto-regular.woff2"></file>
+            <file href="res/unsupportedBrowser/unsupported-browser.html"></file>
+            <file href="res/unsupportedBrowser/unsupported-browser.js"></file>
+            <file href="res/unsupportedBrowser/unsupportedBrowserImages/Chrome.png"></file>
+            <file href="res/unsupportedBrowser/unsupportedBrowserImages/Edge.png"></file>
+            <file href="res/unsupportedBrowser/unsupportedBrowserImages/Firefox.png"></file>
+            <file href="res/unsupportedBrowser/unsupportedBrowserImages/Safari.png"></file>
+            <file href="res/goodbye.html"></file>
+            <file href="res/fonts/inter/inter-bold-italic.woff2"></file>
+            <file href="res/fonts/inter/inter-bold.woff2"></file>
+            <file href="res/fonts/inter/inter-regular-italic.woff2"></file>
+            <file href="res/fonts/inter/inter-regular.woff2"></file>
+            <file href="res/fonts/inter/inter-semiBold-italic.woff2"></file>
+            <file href="res/fonts/inter/inter-semiBold.woff2"></file>
+            <file href="res/fonts/inter/inter-bold-italic.woff2"></file>
+            <file href="res/fonts/inter/inter-bold.woff2"></file>
+            <file href="res/fonts/inter/inter-regular-italic.woff2"></file>
+            <file href="res/fonts/inter/inter-regular.woff2"></file>
+            <file href="res/fonts/inter/inter-semiBold-italic.woff2"></file>
+            <file href="res/fonts/inter/inter-semiBold.woff2"></file>
+            <file href="res/index.html"></file>
+            <file href="res/connectors/scorm.min.js"></file>
+            <file href="res/lng/ru-RU/messages.json"></file>
+            <file href="res/data-1.json"></file>
+            <file href="res/data/islru-10018783/b34e63d0-7b8a-11f1-b0fb-52d455a634c2.png"></file>
+            <file href="res/data/islru-10018783/4f8ab887-7b8c-11f1-bc15-1219a2f13434.png"></file>
+            <file href="res/data/islru-10018783/5ea67e36-7b8e-11f1-bc15-1219a2f13434.png"></file>
+        </resource>
+    </resources>
+</manifest>

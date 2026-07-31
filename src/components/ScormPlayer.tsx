@@ -1,156 +1,129 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowUpRight } from './ui/Icon'
+import { cn, displayTitle } from '@/lib/utils'
+import { createScormRuntime } from '@/lib/scormRuntime'
+import type { CmiData, ScormStatus } from '@/lib/scormRuntime'
 
 /**
- * Плеер SCORM-пакетов (SCORM 1.2). Контент запускается в iframe, а на родительском
- * окне поднимается минимальный SCORM-runtime (`window.API`), который пакет находит
- * через `lms.js`. Прогресс/статус сохраняются в localStorage (демо-режим) и
- * пробрасываются наверх через onStatus — чтобы обновлять прогресс курса.
+ * Плеер SCORM-пакетов. Контент запускается в iframe, а на родительском окне
+ * поднимается SCORM-runtime обеих версий стандарта (`window.API` для SCORM 1.2 и
+ * `window.API_1484_11` для SCORM 2004) — пакет находит нужный, поднимаясь по
+ * родительским фреймам. Модель данных и расчёт прогресса — в src/lib/scormRuntime.ts.
  *
- * В продакшене этот runtime заменяется на серверный трекинг (отправка cmi.* в API).
+ * Плеер ничего не хранит: состояние прошлого сеанса приходит в `state`, а новое
+ * отдаётся наверх через `onStatus`/`onCommit`. Сохранением занимается
+ * ProgressContext — локально и на сервере, персонально для слушателя.
  */
 
-type CmiData = Record<string, string>
-
-export interface ScormStatus {
-  /** cmi.core.lesson_status (completed/passed/incomplete/…). */
-  status: string
-  /** cmi.core.score.raw, если задан. */
-  score?: number
-  /** Прогресс прохождения, 0–100. */
-  progress: number
-  completed: boolean
-}
-
-interface Scorm12Api {
-  LMSInitialize: () => string
-  LMSFinish: () => string
-  LMSGetValue: (key: string) => string
-  LMSSetValue: (key: string, value: string) => string
-  LMSCommit: () => string
-  LMSGetLastError: () => string
-  LMSGetErrorString: () => string
-  LMSGetDiagnostic: () => string
-}
-
-declare global {
-  interface Window {
-    API?: Scorm12Api
-  }
-}
-
-function computeStatus(data: CmiData): ScormStatus {
-  const status = data['cmi.core.lesson_status'] || 'not attempted'
-  const raw = parseFloat(data['cmi.core.score.raw'] ?? '')
-  const hasScore = Number.isFinite(raw)
-  const completed = status === 'completed' || status === 'passed'
-  const progress = completed ? 100 : hasScore ? Math.min(100, Math.max(0, Math.round(raw))) : 0
-  return { status, score: hasScore ? raw : undefined, progress, completed }
-}
-
-function createApi(
-  storageKey: string,
-  studentName: string,
-  emit: (s: ScormStatus) => void,
-): Scorm12Api {
-  const defaults: CmiData = {
-    'cmi.core.student_id': 'u-001',
-    'cmi.core.student_name': studentName,
-    'cmi.core.lesson_status': 'not attempted',
-    'cmi.core.lesson_mode': 'normal',
-    'cmi.core.credit': 'credit',
-    'cmi.core.entry': 'ab-initio',
-    'cmi.core.score.raw': '',
-    'cmi.suspend_data': '',
-    'cmi.launch_data': '',
-  }
-
-  let data: CmiData = { ...defaults }
-  try {
-    const raw = localStorage.getItem(storageKey)
-    if (raw) data = { ...defaults, ...(JSON.parse(raw) as CmiData) }
-  } catch {
-    /* игнорируем повреждённое состояние */
-  }
-
-  const persist = () => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(data))
-    } catch {
-      /* приватный режим / переполнение — не критично */
-    }
-    emit(computeStatus(data))
-    return 'true'
-  }
-
-  return {
-    LMSInitialize: () => 'true',
-    LMSFinish: persist,
-    LMSGetValue: (key) => data[key] ?? '',
-    LMSSetValue: (key, value) => {
-      data[key] = value
-      if (key === 'cmi.core.lesson_status' || key === 'cmi.core.score.raw') {
-        emit(computeStatus(data))
-      }
-      return 'true'
-    },
-    LMSCommit: persist,
-    LMSGetLastError: () => '0',
-    LMSGetErrorString: () => 'No error',
-    LMSGetDiagnostic: () => '',
-  }
-}
+export type { CmiData, ScormStatus } from '@/lib/scormRuntime'
 
 interface ScormPlayerProps {
   /** URL точки входа SCORM (res/index.html). */
   src: string
   title: string
+  /** Идентификатор слушателя для cmi.core.student_id. */
+  studentId?: string
   /** Имя слушателя для cmi.core.student_name. */
   studentName?: string
-  /** Ключ для сохранения прогресса. */
-  storageKey: string
-  /** Колбэк при изменении статуса/прогресса SCORM. */
+  /**
+   * Сохранённое состояние `cmi.*` прошлого сеанса. Читается один раз при
+   * запуске пакета, поэтому передавать его нужно уже загруженным.
+   */
+  state?: CmiData | null
+  /** Прогресс или статус изменились по ходу прохождения. */
   onStatus?: (status: ScormStatus) => void
+  /** Пакет попросил сохранить состояние — вместе со снимком модели данных. */
+  onCommit?: (status: ScormStatus, data: CmiData) => void
 }
 
 export function ScormPlayer({
   src,
   title,
-  studentName = 'Слушатель МАБЛ',
-  storageKey,
+  studentId = 'guest',
+  studentName = 'Слушатель',
+  state,
   onStatus,
+  onCommit,
 }: ScormPlayerProps) {
-  const [ready, setReady] = useState(false)
+  // Пакет, для точки входа которого уже поднят runtime. Iframe рендерим только
+  // после этого: иначе пакет не найдёт window.API и стартует без связи с LMS.
+  const [readySrc, setReadySrc] = useState<string | null>(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  const stateRef = useRef(state)
+  stateRef.current = state
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
+  const onCommitRef = useRef(onCommit)
+  onCommitRef.current = onCommit
 
   useEffect(() => {
-    const api = createApi(storageKey, studentName, (s) => onStatusRef.current?.(s))
-    window.API = api
-    setReady(true)
+    const runtime = createScormRuntime({
+      studentId,
+      studentName,
+      initial: stateRef.current,
+      onChange: (status) => onStatusRef.current?.(status),
+      onCommit: (status, data) => onCommitRef.current?.(status, data),
+    })
+    window.API = runtime.api12
+    window.API_1484_11 = runtime.api2004
+    setReadySrc(src)
+
     return () => {
-      if (window.API === api) delete window.API
+      if (window.API === runtime.api12) delete window.API
+      if (window.API_1484_11 === runtime.api2004) delete window.API_1484_11
+      // Пакет мог не успеть вызвать Commit перед закрытием вкладки или уходом
+      // со страницы — сохраняем то, что он успел записать.
+      onCommitRef.current?.(runtime.getStatus(), runtime.getData())
     }
-  }, [storageKey, studentName])
+  }, [src, studentId, studentName])
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement === wrapRef.current)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) void document.exitFullscreen()
+    else void wrapRef.current?.requestFullscreen()
+  }
 
   return (
-    <div className="overflow-hidden rounded-card border border-ink-10 bg-neft">
+    <div
+      ref={wrapRef}
+      className={cn(
+        'overflow-hidden border border-ink-10 bg-neft',
+        isFullscreen ? 'flex h-full w-full flex-col' : 'rounded-card',
+      )}
+    >
       <div className="flex items-center justify-between gap-3 border-b border-wisdom/10 px-4 py-2.5">
         <span className="truncate text-[0.72rem] uppercase tracking-wide text-wisdom/60">
-          SCORM · {title}
+          {displayTitle(title)}
         </span>
-        <a
-          href={src}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex shrink-0 items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
-        >
-          Открыть в новой вкладке <ArrowUpRight width={14} height={14} />
-        </a>
+        <div className="flex shrink-0 items-center gap-4">
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            className="inline-flex items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
+          >
+            {isFullscreen ? 'Свернуть' : 'На весь экран'}
+          </button>
+          <a
+            href={src}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
+          >
+            Открыть в новой вкладке <ArrowUpRight width={14} height={14} />
+          </a>
+        </div>
       </div>
-      <div className="relative aspect-video w-full bg-[#444c54]">
-        {ready && (
+      <div className={cn('relative w-full bg-[#444c54]', isFullscreen ? 'flex-1' : 'aspect-video')}>
+        {readySrc === src && (
           <iframe
+            key={src}
             src={src}
             title={title}
             className="absolute inset-0 h-full w-full"

@@ -26,10 +26,6 @@ export const newsApi = {
     return http<void>(`/news/${id}`, { method: 'DELETE' })
   },
 
-  /** Сброс к исходным данным (сидам). */
-  async reset(): Promise<NewsItem[]> {
-    return http<NewsItem[]>('/news/reset', { method: 'POST' })
-  },
 
   /** Импорт новостей из Telegram-канала. */
   async sync(): Promise<{ ok: boolean; channel: string; synced: number }> {

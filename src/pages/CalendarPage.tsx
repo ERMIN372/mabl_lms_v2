@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Container, SectionHeading } from '@/components/ui/Section'
 import { EventCard } from '@/components/EventCard'
 import { Badge } from '@/components/ui/Badge'
@@ -26,6 +27,7 @@ export default function CalendarPage() {
   const [active, setActive] = useState<CalendarEventType | 'Все'>('Все')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [confirmation, setConfirmation] = useState('')
+  const [needAuth, setNeedAuth] = useState(false)
 
   const sorted = useMemo(
     () => [...events].sort((a, b) => +new Date(a.date) - +new Date(b.date)),
@@ -33,26 +35,17 @@ export default function CalendarPage() {
   )
   const filtered = active === 'Все' ? sorted : sorted.filter((e) => e.type === active)
 
-  const handleRegister = async (event: CalendarEvent) => {
-    setBusyId(event.id)
-    setConfirmation('')
-    try {
-      await registerEvent(
-        event.id,
-        event.price && event.price > 0
-          ? {
-              itemId: event.id,
-              itemTitle: event.title,
-              amount: event.price,
-              currency: 'RUB',
-              customerEmail: user?.email,
-            }
-          : undefined,
-      )
-      setConfirmation(`Вы записаны на «${event.title}». Детали отправлены на вашу почту.`)
-    } finally {
-      setBusyId(null)
+  const handleRegister = (event: CalendarEvent) => {
+    if (!user) {
+      setConfirmation('')
+      setNeedAuth(true)
+      return
     }
+    setNeedAuth(false)
+    setBusyId(event.id)
+    registerEvent(event.id)
+    setConfirmation(`Вы записаны на «${event.title}».`)
+    setBusyId(null)
   }
 
   return (
@@ -63,6 +56,15 @@ export default function CalendarPage() {
           title="Календарь академии"
           description="Вебинары, дедлайны курсов и мероприятия сообщества МАБЛ. Записывайтесь на события в один клик."
         />
+
+        {needAuth && (
+          <div className="mt-8 flex flex-wrap items-center gap-3 rounded-card border border-ink-20 bg-ink-5 px-5 py-4 text-sm text-neft">
+            Запись на события доступна после входа в личный кабинет.
+            <Link to="/login" state={{ from: '/calendar' }} className="text-ocean underline">
+              Войти
+            </Link>
+          </div>
+        )}
 
         {confirmation && (
           <div className="mt-8 flex items-center gap-3 rounded-card border border-oceanc-20 bg-oceanc-10 px-5 py-4 text-sm text-ocean">

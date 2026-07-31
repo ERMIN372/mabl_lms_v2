@@ -48,8 +48,4 @@ export const forumApi = {
     return http<void>(`/forum/topics/${id}`, { method: 'DELETE' })
   },
 
-  /** Сброс форума к исходным данным (сидам). */
-  async reset(): Promise<void> {
-    await http('/forum/reset', { method: 'POST' })
-  },
 }

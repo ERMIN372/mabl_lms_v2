@@ -27,6 +27,7 @@ function blankCourse(): Course {
     format: 'video',
     level: 'Базовый',
     instructor: '',
+    curator: '',
     durationHours: 0,
     lessonsCount: 0,
     price: 0,
@@ -175,12 +176,20 @@ export default function AdminCourseEditPage() {
           </label>
         </div>
 
-        <Input
-          label="Преподаватель"
-          value={form.instructor}
-          onChange={(e) => set('instructor', e.target.value)}
-          placeholder="проф. Анна Корецкая"
-        />
+        <div className="grid gap-6 sm:grid-cols-2">
+          <Input
+            label="Преподаватель"
+            value={form.instructor}
+            onChange={(e) => set('instructor', e.target.value)}
+            placeholder="Имя и учёная степень преподавателя"
+          />
+          <Input
+            label="Куратор кафедры"
+            value={form.curator ?? ''}
+            onChange={(e) => set('curator', e.target.value)}
+            placeholder="Имя куратора кафедры"
+          />
+        </div>
 
         <div className="grid gap-6 sm:grid-cols-3">
           <label className="block">
