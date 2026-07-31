@@ -10,9 +10,14 @@ type Sql = NeonQueryFunction<false, false>
 
 /**
  * Стартовый аккаунт администратора. Создаётся только если такого e-mail в базе
- * ещё нет; логин и пароль можно задать переменными окружения ADMIN_EMAIL и
+ * ещё нет; логин и пароль задаются переменными окружения ADMIN_EMAIL и
  * ADMIN_PASSWORD. Контент платформы (программы, события, материалы, участники,
- * заказы) создаётся из админ-панели — демо-данными база не наполняется.
+ * заказы) создаётся из админ-панели — никакими данными база не наполняется.
+ *
+ * Пароля по умолчанию нет намеренно: константа в открытом коде означала бы, что
+ * доступ к админке знает каждый, кто видел репозиторий. Если ADMIN_PASSWORD не
+ * задан, инициализация генерирует случайный пароль и возвращает его в ответе —
+ * один раз, посмотреть и сохранить.
  */
 export const defaultAdmin = {
   id: 'u-adm',
@@ -20,7 +25,13 @@ export const defaultAdmin = {
   email: (process.env.ADMIN_EMAIL || 'admin@mabl.ru').trim().toLowerCase(),
   role: 'Администратор платформы',
   kind: 'admin',
-  password: process.env.ADMIN_PASSWORD || 'admin2026',
+}
+
+/** Случайный пароль на случай, когда ADMIN_PASSWORD не задан. */
+function generatePassword(): string {
+  const alphabet = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('')
 }
 
 /** Создаёт таблицы, если их ещё нет. */
@@ -135,18 +146,43 @@ export async function ensureSchema(sql: Sql): Promise<void> {
 }
 
 /** Инициализация: схема + стартовый администратор (без перезаписи существующих данных). */
-export async function initDatabase(sql: Sql): Promise<{ courses: number; users: number }> {
+export interface InitResult {
+  courses: number
+  users: number
+  /** Создан ли аккаунт администратора этим вызовом. */
+  adminCreated: boolean
+  /** E-mail администратора (существующего или созданного). */
+  adminEmail: string
+  /**
+   * Сгенерированный пароль — только если аккаунт создан прямо сейчас и
+   * ADMIN_PASSWORD не задан. Показывается один раз: в базе лежит только хэш.
+   */
+  adminPassword?: string
+}
+
+export async function initDatabase(sql: Sql): Promise<InitResult> {
   await ensureSchema(sql)
 
-  const hash = await bcrypt.hash(defaultAdmin.password, 10)
-  await sql`
+  const envPassword = process.env.ADMIN_PASSWORD?.trim()
+  const password = envPassword || generatePassword()
+  const hash = await bcrypt.hash(password, 10)
+  const created = await sql`
     INSERT INTO users (id, name, email, role, kind, password_hash)
     VALUES (${defaultAdmin.id}, ${defaultAdmin.name}, ${defaultAdmin.email},
       ${defaultAdmin.role}, ${defaultAdmin.kind}, ${hash})
     ON CONFLICT (email) DO NOTHING
+    RETURNING id
   `
+  const adminCreated = created.length > 0
 
   const [{ count: usersCount }] = await sql`SELECT COUNT(*)::int AS count FROM users`
   const [{ count: coursesCount }] = await sql`SELECT COUNT(*)::int AS count FROM courses`
-  return { courses: Number(coursesCount), users: Number(usersCount) }
+  return {
+    courses: Number(coursesCount),
+    users: Number(usersCount),
+    adminCreated,
+    adminEmail: defaultAdmin.email,
+    // Пароль отдаём только когда аккаунт создан и задать его было негде.
+    ...(adminCreated && !envPassword ? { adminPassword: password } : {}),
+  }
 }

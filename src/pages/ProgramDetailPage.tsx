@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { Crest } from '@/components/brand/Crest'
 import { Check, ArrowRight } from '@/components/ui/Icon'
+import { ApplicationForm } from '@/components/ApplicationForm'
 import { getProgramById } from '@/data/programs'
 import type { ProgramModule } from '@/types'
 
@@ -23,6 +24,17 @@ function groupModules(modules: ProgramModule[]): { phase: string | null; items: 
     else groups.push({ phase, items: [m] })
   }
   return groups
+}
+
+/**
+ * Прокрутка к форме заявки.
+ *
+ * Переход по якорю внутри SPA обрабатывает <ScrollToTop/>, но если адрес уже
+ * содержит `#apply`, маршрут не меняется и эффект не срабатывает — тогда
+ * прокручиваем сами, чтобы кнопка всегда вела к форме.
+ */
+function scrollToApply() {
+  document.getElementById('apply')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 export default function ProgramDetailPage() {
@@ -76,7 +88,7 @@ export default function ProgramDetailPage() {
           </dl>
 
           <div className="mt-10 flex flex-col gap-3 sm:flex-row">
-            <Button to="#apply" size="lg">
+            <Button to="#apply" size="lg" onClick={scrollToApply}>
               Оставить заявку
             </Button>
             {program.document && (
@@ -331,14 +343,15 @@ export default function ProgramDetailPage() {
               Оставьте заявку — приёмная комиссия свяжется с вами, расскажет о ближайшем
               наборе, условиях и формате обучения.
             </p>
-            <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
-              <Button to="/login" size="lg">
-                Оставить заявку
-              </Button>
-              <Button to="/courses" variant="secondary" size="lg">
-                Другие программы
-              </Button>
+            <div className="mt-8">
+              <ApplicationForm programId={program.id} programTitle={program.title} />
             </div>
+            <p className="mt-6 text-[0.78rem] text-ink-60">
+              Ещё выбираете?{' '}
+              <Link to="/programs" className="underline hover:text-neft">
+                Посмотреть другие программы
+              </Link>
+            </p>
             {program.document && (
               <p className="mt-8 text-[0.72rem] uppercase tracking-wide text-ink-40">
                 По итогам — {program.document}

@@ -181,13 +181,13 @@ export default function AdminCourseEditPage() {
             label="Преподаватель"
             value={form.instructor}
             onChange={(e) => set('instructor', e.target.value)}
-            placeholder="проф. Анна Корецкая"
+            placeholder="Имя и учёная степень преподавателя"
           />
           <Input
             label="Куратор кафедры"
             value={form.curator ?? ''}
             onChange={(e) => set('curator', e.target.value)}
-            placeholder="доц. Мария Соколова"
+            placeholder="Имя куратора кафедры"
           />
         </div>
 

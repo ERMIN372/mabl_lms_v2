@@ -27,6 +27,7 @@ import type {
   NewsItem,
   Order,
   OrderStatus,
+  ProgramApplication,
   Survey,
   User,
 } from '../src/types'
@@ -93,6 +94,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // заголовка авторизации — права администратора проверяются внутри обработчика
     // по токену из clientPayload.
     path === 'scorm/blob-upload' ||
+    path === 'materials/blob-upload' ||
+    // Заявку на поступление оставляет любой посетитель страницы программы —
+    // авторизация здесь не требуется по определению.
+    path === 'applications' ||
     (segments[0] === 'news' && (segments[2] === 'comments' || segments[2] === 'reactions'))
   const needsAdmin = segments[0] === 'admin' || (isMutation && !isPublicMutation)
   if (needsAdmin && !requireAdmin(req, res)) return
@@ -229,11 +234,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         await contentCreate<Material>('materials', parseBody(req) as Material, 'material'),
       )
     }
+    // Прикреплённый файл материала грузится напрямую в Blob — так же, как
+    // файлы SCORM-пакетов (в обход лимита тела запроса Vercel 4.5 МБ).
+    if (path === 'materials/blob-upload' && method === 'POST') {
+      return await blobUpload('materials/', req, res)
+    }
     if (segments[0] === 'materials' && segments.length === 2) {
       const id = segments[1]
       if (method === 'GET') return found(res, await contentGet<Material>('materials', id), 'Материал не найден')
-      if (method === 'PUT') return res.json(await contentUpdate<Material>('materials', id, parseBody(req)))
-      if (method === 'DELETE') { await contentRemove('materials', id); return res.status(204).end() }
+      if (method === 'PUT') return await updateMaterial(id, req, res)
+      if (method === 'DELETE') return await deleteMaterial(id, res)
     }
 
     // ---------- SURVEYS (БД) ----------
@@ -325,8 +335,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'admin/db/init' && method === 'POST') {
       const sql = getSql()
-      const counts = await initDatabase(sql)
-      return res.json({ ok: true, counts })
+      const { courses, users, ...admin } = await initDatabase(sql)
+      // adminPassword приходит только когда аккаунт создан этим вызовом и
+      // ADMIN_PASSWORD не задан: показать один раз и больше нигде не хранить.
+      return res.json({ ok: true, counts: { courses, users }, ...admin })
     }
     // Диагностика почты: настроен ли SMTP и уходит ли тестовое письмо.
     if (path === 'admin/mail' && method === 'GET') {
@@ -396,46 +408,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Преflight перед загрузкой: сообщает клиенту конкретную причину отказа
     // (истёкшая админ-сессия или неподключённое хранилище Blob), потому что SDK
     // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
-    if (path === 'scorm/upload-preflight' && method === 'GET') {
-      const admin = verifyToken(bearer(req))?.kind === 'admin'
-      // Два способа записи в Blob: классический RW-токен либо OIDC-подключение
-      // store к проекту (Vercel выдаёт BLOB_STORE_ID вместо токена, и функции
-      // авторизуются самостоятельно). Клиент выбирает флоу загрузки по mode.
-      const hasToken = Boolean(blobReadWriteToken())
-      const hasOidcStore = Boolean(process.env.BLOB_STORE_ID)
-      // Пробная выдача подписанного токена: SDK на клиенте прячет причину
-      // отказа за общей фразой «Failed to retrieve the presigned URL», поэтому
-      // реальную ошибку (например, выключенный OIDC у проекта) ловим здесь и
-      // показываем администратору до начала загрузки.
-      let presignError: string | undefined
-      if (admin && !hasToken && hasOidcStore) {
-        try {
-          await issueSignedToken({
-            pathname: 'scorm/_preflight',
-            operations: ['put'],
-            validUntil: Date.now() + 60_000,
-          })
-        } catch (err) {
-          presignError = err instanceof Error ? err.message : String(err)
-          console.error('[scorm] preflight issueSignedToken error:', err)
-        }
-      }
-      return res.json({
-        admin,
-        blob: hasToken || hasOidcStore,
-        mode: hasToken ? 'token' : hasOidcStore ? 'presigned' : undefined,
-        presignError,
-        // Имена (без значений) blob-переменных окружения — чтобы отличить
-        // «хранилище не подключено» от «токен под нестандартным именем».
-        blobEnv: admin
-          ? Object.keys(process.env).filter(
-              (k) => k.includes('BLOB') || k.endsWith('_READ_WRITE_TOKEN'),
-            )
-          : undefined,
-      })
+    // Ответ не зависит от раздела — им пользуются и SCORM-пакеты, и файлы
+    // материалов (путь `scorm/upload-preflight` оставлен для совместимости).
+    if (
+      (path === 'storage/upload-preflight' || path === 'scorm/upload-preflight') &&
+      method === 'GET'
+    ) {
+      return res.json(await uploadPreflight(req))
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
-      return await scormBlobUpload(req, res)
+      return await blobUpload('scorm/', req, res)
     }
     // Диагностика пакета: проверяет каждый файл так, как его отдаёт раздача,
     // и возвращает по нему реальный HTTP-статус. Только для администратора.
@@ -498,6 +480,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (method === 'GET') return found(res, await getOrder(id), 'Заказ не найден')
       if (method === 'PUT') return await updateOrder(id, req, res)
       if (method === 'DELETE') return await deleteOrder(id, res)
+    }
+
+    // ---------- ЗАЯВКИ НА ПОСТУПЛЕНИЕ ----------
+    // Приём заявки — публичный (со страницы программы), просмотр и обработка —
+    // только для приёмной комиссии в админ-панели.
+    if (path === 'applications' && method === 'POST') {
+      return await createApplication(req, res)
+    }
+    if (path === 'admin/applications' && method === 'GET') {
+      return res.json(await contentList<ProgramApplication>('applications'))
+    }
+    if (segments[0] === 'admin' && segments[1] === 'applications' && segments.length === 3) {
+      const id = segments[2]
+      if (method === 'GET') {
+        return found(res, await contentGet<ProgramApplication>('applications', id), 'Заявка не найдена')
+      }
+      if (method === 'PUT' || method === 'PATCH') {
+        return res.json(await contentUpdate<ProgramApplication>('applications', id, parseBody(req)))
+      }
+      if (method === 'DELETE') {
+        await contentRemove('applications', id)
+        return res.status(204).end()
+      }
     }
 
     return res.status(404).json({ message: `Маршрут не найден: ${method} /api/${path}` })
@@ -997,6 +1002,61 @@ async function deleteOrder(id: string, res: VercelResponse) {
   await ensureSchema(sql)
   await sql`DELETE FROM orders WHERE id = ${id}`
   return res.status(204).end()
+}
+
+// ---------------- заявки на поступление ----------------
+
+/**
+ * POST /api/applications — приём заявки со страницы программы.
+ *
+ * Публичный эндпоинт: имя, e-mail и телефон приходят из формы, статус и дату
+ * проставляет сервер (клиенту их доверять нельзя). Если запрос пришёл с
+ * действующим токеном сессии, заявку связываем с аккаунтом.
+ */
+async function createApplication(req: VercelRequest, res: VercelResponse) {
+  const body = parseBody(req)
+  const name = String(body.name ?? '').trim()
+  const email = String(body.email ?? '').trim().toLowerCase()
+  const phone = String(body.phone ?? '').trim()
+  const comment = String(body.comment ?? '').trim()
+  const programId = String(body.programId ?? '').trim()
+  const programTitle = String(body.programTitle ?? '').trim()
+
+  if (!name || !email || !phone) {
+    return res.status(400).json({ message: 'Укажите имя, e-mail и телефон.' })
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ message: 'Укажите корректный e-mail.' })
+  }
+  if (phone.replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ message: 'Укажите корректный номер телефона.' })
+  }
+  if (!programId) {
+    return res.status(400).json({ message: 'Не указана программа.' })
+  }
+
+  const session = verifyToken(bearer(req))
+  const application: ProgramApplication = {
+    id: `APP-${Date.now().toString(36).toUpperCase()}`,
+    programId,
+    programTitle: programTitle || programId,
+    name: name.slice(0, 200),
+    email: email.slice(0, 200),
+    phone: phone.slice(0, 50),
+    ...(comment ? { comment: comment.slice(0, 2000) } : {}),
+    status: 'new',
+    createdAt: new Date().toISOString(),
+    ...(session ? { userId: session.id } : {}),
+  }
+
+  // prepend=true — свежие заявки оказываются вверху списка в админ-панели.
+  const created = await contentCreate<ProgramApplication>(
+    'applications',
+    application,
+    'application',
+    true,
+  )
+  return res.status(201).json(created)
 }
 
 // ---------------- доступ к программам ----------------
@@ -1697,7 +1757,8 @@ function blobReadWriteToken(): string | undefined {
 
 /**
  * Авторизовать прямую загрузку клиента в Blob. Права администратора проверяем
- * по токену сессии из clientPayload; путь ограничиваем префиксом scorm/.
+ * по токену сессии из clientPayload; путь ограничиваем переданным префиксом
+ * (`scorm/` — файлы пакетов, `materials/` — файлы учебных материалов).
  *
  * Поддерживаются оба флоу SDK @vercel/blob:
  * - классический (blob.generate-client-token) — когда в окружении есть
@@ -1706,7 +1767,7 @@ function blobReadWriteToken(): string | undefined {
  *   по OIDC (в окружении только BLOB_STORE_ID, функции авторизуются сами,
  *   а мы подписываем короткоживущий токен через issueSignedToken).
  */
-async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
+async function blobUpload(prefix: string, req: VercelRequest, res: VercelResponse) {
   const assertAllowed = (pathname: string, clientPayload?: string | null) => {
     let ok = false
     try {
@@ -1717,7 +1778,7 @@ async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
       ok = false
     }
     if (!ok) throw new Error('Требуются права администратора.')
-    if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
+    if (!pathname.startsWith(prefix)) throw new Error('Недопустимый путь загрузки.')
   }
 
   try {
@@ -1762,9 +1823,85 @@ async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
   } catch (err) {
     // Клиентский SDK не показывает тело ответа — реальная причина видна
     // только в серверных логах, поэтому пишем её туда обязательно.
-    console.error('[scorm] blob-upload error:', err)
+    console.error(`[${prefix}] blob-upload error:`, err)
     const message = err instanceof Error ? err.message : 'Ошибка загрузки в Blob'
     return res.status(400).json({ message })
+  }
+}
+
+/**
+ * Состояние хранилища перед загрузкой: есть ли права администратора, подключён
+ * ли Blob и каким способом авторизуется запись (RW-токен или OIDC-пресайнд).
+ * Общий ответ для всех разделов, которые грузят файлы напрямую в Blob.
+ */
+async function uploadPreflight(req: VercelRequest) {
+  const admin = verifyToken(bearer(req))?.kind === 'admin'
+  // Два способа записи в Blob: классический RW-токен либо OIDC-подключение
+  // store к проекту (Vercel выдаёт BLOB_STORE_ID вместо токена, и функции
+  // авторизуются самостоятельно). Клиент выбирает флоу загрузки по mode.
+  const hasToken = Boolean(blobReadWriteToken())
+  const hasOidcStore = Boolean(process.env.BLOB_STORE_ID)
+  // Пробная выдача подписанного токена: SDK на клиенте прячет причину отказа
+  // за общей фразой «Failed to retrieve the presigned URL», поэтому реальную
+  // ошибку (например, выключенный OIDC у проекта) ловим здесь и показываем
+  // администратору до начала загрузки.
+  let presignError: string | undefined
+  if (admin && !hasToken && hasOidcStore) {
+    try {
+      await issueSignedToken({
+        pathname: '_preflight',
+        operations: ['put'],
+        validUntil: Date.now() + 60_000,
+      })
+    } catch (err) {
+      presignError = err instanceof Error ? err.message : String(err)
+      console.error('[storage] preflight issueSignedToken error:', err)
+    }
+  }
+  return {
+    admin,
+    blob: hasToken || hasOidcStore,
+    mode: hasToken ? 'token' : hasOidcStore ? 'presigned' : undefined,
+    presignError,
+    // Имена (без значений) blob-переменных окружения — чтобы отличить
+    // «хранилище не подключено» от «токен под нестандартным именем».
+    blobEnv: admin
+      ? Object.keys(process.env).filter(
+          (k) => k.includes('BLOB') || k.endsWith('_READ_WRITE_TOKEN'),
+        )
+      : undefined,
+  }
+}
+
+// ---------------- материалы ----------------
+
+/**
+ * Обновление материала с уборкой в хранилище: если файл заменили или отвязали,
+ * старый объект в Blob удаляем — иначе он останется висеть навсегда.
+ */
+async function updateMaterial(id: string, req: VercelRequest, res: VercelResponse) {
+  const previous = await contentGet<Material>('materials', id)
+  const next = await contentUpdate<Material>('materials', id, parseBody(req))
+  if (previous?.fileUrl && previous.fileUrl !== next.fileUrl) {
+    await removeBlobFile(previous.fileUrl)
+  }
+  return res.json(next)
+}
+
+/** Удаление материала вместе с прикреплённым файлом. */
+async function deleteMaterial(id: string, res: VercelResponse) {
+  const material = await contentGet<Material>('materials', id)
+  await contentRemove('materials', id)
+  if (material?.fileUrl) await removeBlobFile(material.fileUrl)
+  return res.status(204).end()
+}
+
+/** Удалить объект в Blob, не роняя основную операцию из-за ошибки хранилища. */
+async function removeBlobFile(url: string): Promise<void> {
+  try {
+    await blobDel(url, { token: blobReadWriteToken() })
+  } catch (err) {
+    console.error('[storage] blob delete error:', err)
   }
 }
 

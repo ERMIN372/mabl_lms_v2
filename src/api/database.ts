@@ -47,6 +47,20 @@ export interface DemoRow {
   title: string
 }
 
+/** Результат инициализации базы. */
+export interface InitResult {
+  ok: boolean
+  counts: { courses: number; users: number }
+  /** Создан ли аккаунт администратора этим вызовом. */
+  adminCreated: boolean
+  adminEmail: string
+  /**
+   * Сгенерированный пароль администратора — приходит один раз и только если
+   * аккаунт создан прямо сейчас, а ADMIN_PASSWORD не задан в окружении.
+   */
+  adminPassword?: string
+}
+
 export interface DbUserPatch {
   name?: string
   role?: string
@@ -59,8 +73,8 @@ export const databaseApi = {
     return http<DbStatus>('/admin/db')
   },
 
-  async init(): Promise<{ ok: boolean; counts: { courses: number; users: number } }> {
-    return http('/admin/db/init', { method: 'POST' })
+  async init(): Promise<InitResult> {
+    return http<InitResult>('/admin/db/init', { method: 'POST' })
   },
 
   /** Состояние отправки писем (SMTP). */

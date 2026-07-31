@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Card, CardBody } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
@@ -18,6 +18,8 @@ export default function AdminDatabasePage() {
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  // Разовое сообщение с паролем созданного администратора: показать и забыть.
+  const initPasswordRef = useRef<string | undefined>(undefined)
 
   const refresh = async () => {
     setLoading(true)
@@ -37,9 +39,10 @@ export default function AdminDatabasePage() {
   const run = async (key: string, fn: () => Promise<void>, okText: string) => {
     setBusy(key)
     setNotice(null)
+    initPasswordRef.current = undefined
     try {
       await fn()
-      setNotice({ tone: 'ok', text: okText })
+      setNotice({ tone: 'ok', text: initPasswordRef.current ?? okText })
       await refresh()
     } catch (e) {
       setNotice({ tone: 'err', text: e instanceof Error ? e.message : 'Не удалось выполнить операцию' })
@@ -121,7 +124,19 @@ export default function AdminDatabasePage() {
                   size="sm"
                   disabled={busy !== null}
                   onClick={() =>
-                    run('init', () => api.database.init().then(() => {}), 'База инициализирована.')
+                    run(
+                      'init',
+                      async () => {
+                        const res = await api.database.init()
+                        // Пароль приходит один раз — только если аккаунт
+                        // администратора создан этим вызовом, а ADMIN_PASSWORD
+                        // не задан в окружении. Больше его взять негде.
+                        initPasswordRef.current = res.adminPassword
+                          ? `Создан администратор ${res.adminEmail}. Пароль: ${res.adminPassword} — сохраните его, второй раз он не покажется.`
+                          : undefined
+                      },
+                      'База инициализирована.',
+                    )
                   }
                 >
                   {busy === 'init' ? 'Выполняется…' : 'Инициализировать'}

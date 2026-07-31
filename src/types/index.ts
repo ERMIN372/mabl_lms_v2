@@ -140,10 +140,19 @@ export interface Material {
   title: string
   description: string
   type: MaterialType
+  /** Человекочитаемый объём файла («3,4 МБ»). */
   size: string
   date: string
   courseId?: string
   body?: string[]
+  /** Адрес прикреплённого файла в хранилище (Vercel Blob). */
+  fileUrl?: string
+  /** Тот же файл с принудительной отдачей на скачивание. */
+  fileDownloadUrl?: string
+  /** Исходное имя файла — подставляется в имя при сохранении. */
+  fileName?: string
+  /** Размер файла в байтах. */
+  fileSize?: number
 }
 
 export type CalendarEventType = 'Вебинар' | 'Дедлайн' | 'Мероприятие'
@@ -273,4 +282,24 @@ export interface Order {
   provider?: string
   /** Когда отправлено письмо «доступ открыт» (защита от повторов). */
   accessEmailSentAt?: string
+}
+
+export type ApplicationStatus = 'new' | 'processing' | 'enrolled' | 'declined'
+
+/** Заявка на поступление, оставленная со страницы программы. */
+export interface ProgramApplication {
+  id: string
+  /** Идентификатор программы (`Program.id`). */
+  programId: string
+  /** Название программы на момент подачи заявки. */
+  programTitle: string
+  name: string
+  email: string
+  phone: string
+  comment?: string
+  status: ApplicationStatus
+  /** Дата подачи (ISO). */
+  createdAt: string
+  /** Аккаунт, из-под которого оставлена заявка (если пользователь авторизован). */
+  userId?: string
 }
