@@ -2,12 +2,13 @@ import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { User } from '@/types'
 import { api } from '@/api'
+import type { RegisterInput, RegisterResult } from '@/api/auth'
 
 /**
  * Сессия пользователя. Учётные данные проверяет слой данных (`api.auth`),
- * а здесь хранится только состояние сессии (в localStorage, чтобы вход
- * сохранялся между перезагрузками). При переходе на реальный бэкенд логика
- * входа меняется в `src/api/auth.ts`, контекст и UI остаются прежними.
+ * здесь хранится только состояние сессии. Профиль дублируется в localStorage,
+ * чтобы вход переживал перезагрузку, но при старте сверяется с сервером
+ * (`GET /api/me`) — так подхватывается актуальный статус подтверждения почты.
  */
 
 const STORAGE_KEY = 'mabl.auth.user'
@@ -23,6 +24,7 @@ function normalizeUser(raw: unknown): User | null {
     email: u.email,
     role: u.role ?? 'Слушатель академии',
     kind: u.kind === 'admin' ? 'admin' : 'student',
+    emailVerified: Boolean(u.emailVerified),
   }
 }
 
@@ -30,10 +32,15 @@ interface AuthContextValue {
   user: User | null
   isAuthenticated: boolean
   isAdmin: boolean
+  /** Подтверждён ли e-mail текущего пользователя. */
+  isEmailVerified: boolean
   login: (email: string, password: string) => Promise<User>
-  register: (input: { name: string; email: string; password: string }) => Promise<User>
+  register: (input: RegisterInput) => Promise<RegisterResult>
   logout: () => void
-  recover: (email: string) => Promise<string>
+  /** Перечитать профиль с сервера (например, после подтверждения почты). */
+  refreshProfile: () => Promise<User | null>
+  /** Запросить письмо со ссылкой для смены пароля. */
+  forgotPassword: (email: string) => Promise<string>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -53,16 +60,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     else localStorage.removeItem(STORAGE_KEY)
   }, [user])
 
+  // Сверяем сохранённый профиль с сервером: истёкшая сессия закрывается,
+  // подтверждение почты и смена имени подхватываются.
+  useEffect(() => {
+    let active = true
+    if (!user) return
+    api.auth.me().then((fresh) => {
+      if (!active) return
+      if (fresh) setUser(fresh)
+      else setUser(null)
+    })
+    return () => {
+      active = false
+    }
+    // Проверка нужна один раз при старте приложения.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const login = async (email: string, password: string) => {
     const account = await api.auth.login(email, password)
     setUser(account)
     return account
   }
 
-  const register = async (input: { name: string; email: string; password: string }) => {
-    const account = await api.auth.register(input)
-    setUser(account)
-    return account
+  const register = async (input: RegisterInput) => {
+    const result = await api.auth.register(input)
+    setUser(result.user)
+    return result
   }
 
   const logout = () => {
@@ -70,17 +94,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }
 
-  const recover = (email: string) => api.auth.recover(email)
+  const refreshProfile = async () => {
+    const fresh = await api.auth.me()
+    if (fresh) setUser(fresh)
+    return fresh
+  }
+
+  const forgotPassword = (email: string) => api.auth.forgotPassword(email)
 
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       isAuthenticated: Boolean(user),
       isAdmin: user?.kind === 'admin',
+      isEmailVerified: Boolean(user?.emailVerified),
       login,
       register,
       logout,
-      recover,
+      refreshProfile,
+      forgotPassword,
     }),
     [user],
   )

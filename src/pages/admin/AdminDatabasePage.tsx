@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { AdminPageHeader, StatCard } from '@/components/admin/AdminUI'
 import { api } from '@/api'
-import type { DbStatus, DbUser, DemoRow } from '@/api/database'
+import type { DbStatus, DbUser, DemoRow, MailStatus } from '@/api/database'
 import { cn } from '@/lib/utils'
 
 type Notice = { tone: 'ok' | 'err'; text: string } | null
@@ -144,10 +144,90 @@ export default function AdminDatabasePage() {
               }
             />
             <div className="border-t border-ink-10" />
+            <MailCheck setNotice={setNotice} />
+            <div className="border-t border-ink-10" />
             <DemoCleanup setNotice={setNotice} />
           </CardBody>
         </Card>
       </section>
+    </div>
+  )
+}
+
+/**
+ * Проверка отправки писем: показывает, настроен ли SMTP, и шлёт тестовое
+ * письмо — чтобы убедиться, что коды подтверждения и восстановление пароля
+ * дойдут до слушателей.
+ */
+function MailCheck({ setNotice }: { setNotice: (n: Notice) => void }) {
+  const [status, setStatus] = useState<MailStatus | null>(null)
+  const [email, setEmail] = useState('')
+  const [busy, setBusy] = useState<'load' | 'send' | null>(null)
+
+  useEffect(() => {
+    let active = true
+    setBusy('load')
+    api.database
+      .mailStatus()
+      .then((s) => active && setStatus(s))
+      .catch(() => active && setStatus(null))
+      .finally(() => active && setBusy(null))
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const sendTest = async () => {
+    setBusy('send')
+    setNotice(null)
+    try {
+      setNotice({ tone: 'ok', text: await api.database.sendTestMail(email) })
+    } catch (e) {
+      setNotice({ tone: 'err', text: e instanceof Error ? e.message : 'Не удалось отправить письмо' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div>
+      <MaintenanceRow
+        title="Отправка писем"
+        desc={
+          status?.configured
+            ? `SMTP настроен: ${status.host}:${status.port}, отправитель ${status.from ?? '—'}. Ссылки в письмах ведут на ${status.siteUrl}.`
+            : 'SMTP не настроен: коды подтверждения e-mail, восстановление пароля и письма о доступе не отправляются. Задайте SMTP_USER и SMTP_PASSWORD в переменных окружения проекта.'
+        }
+        action={
+          <Badge tone={status?.configured ? 'ocean' : 'outline'}>
+            {busy === 'load' ? '…' : status?.configured ? 'Настроен' : 'Не настроен'}
+          </Badge>
+        }
+      />
+      {status?.configured && (
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <label className="min-w-[220px] flex-1">
+            <span className="mb-1.5 block text-[0.7rem] uppercase tracking-wide text-ink-60">
+              Тестовое письмо на адрес
+            </span>
+            <input
+              className={inputClass}
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@company.com"
+            />
+          </label>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={busy !== null || !email.includes('@')}
+            onClick={() => void sendTest()}
+          >
+            {busy === 'send' ? 'Отправляем…' : 'Отправить'}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

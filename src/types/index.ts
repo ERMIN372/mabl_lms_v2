@@ -237,6 +237,8 @@ export interface User {
   role: string
   /** Уровень доступа: администратор или слушатель. */
   kind: UserRole
+  /** Подтверждён ли e-mail кодом из письма. */
+  emailVerified?: boolean
 }
 
 // Администрирование: участники и заказы
@@ -278,6 +280,8 @@ export interface Order {
   paymentId?: string
   /** Платёжный провайдер, через который оформлен заказ. */
   provider?: string
+  /** Когда отправлено письмо «доступ открыт» (защита от повторов). */
+  accessEmailSentAt?: string
 }
 
 export type ApplicationStatus = 'new' | 'processing' | 'enrolled' | 'declined'

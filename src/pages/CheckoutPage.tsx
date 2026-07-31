@@ -14,6 +14,52 @@ import { useAuth } from '@/context/AuthContext'
 import { formatPrice, formatDuration, displayTitle } from '@/lib/utils'
 import { courseFormatLabel } from '@/lib/labels'
 
+/** Незавершённый платёж: номер заказа и ссылка на форму ЮKassa. */
+interface PendingPayment {
+  orderId: string
+  url: string
+  at: number
+}
+
+/** Ссылка живёт ограниченное время — старую показывать бессмысленно. */
+const PENDING_TTL_MS = 6 * 60 * 60 * 1000
+
+function pendingKey(courseId: string): string {
+  return `mabl.pending.payment.${courseId}`
+}
+
+function loadPending(courseId: string): PendingPayment | null {
+  try {
+    const raw = sessionStorage.getItem(pendingKey(courseId))
+    if (!raw) return null
+    const value = JSON.parse(raw) as PendingPayment
+    if (!value?.url || !value.orderId) return null
+    if (Date.now() - value.at > PENDING_TTL_MS) {
+      sessionStorage.removeItem(pendingKey(courseId))
+      return null
+    }
+    return value
+  } catch {
+    return null
+  }
+}
+
+function savePending(courseId: string, value: PendingPayment): void {
+  try {
+    sessionStorage.setItem(pendingKey(courseId), JSON.stringify(value))
+  } catch {
+    /* хранилище недоступно — не критично */
+  }
+}
+
+function clearPending(courseId: string): void {
+  try {
+    sessionStorage.removeItem(pendingKey(courseId))
+  } catch {
+    /* хранилище недоступно — не критично */
+  }
+}
+
 export default function CheckoutPage() {
   const [params] = useSearchParams()
   const courseId = params.get('course') || ''
@@ -26,6 +72,11 @@ export default function CheckoutPage() {
   const [email, setEmail] = useState(user?.email || '')
   const [processing, setProcessing] = useState(false)
   const [error, setError] = useState('')
+  // Созданный, но не оплаченный платёж: браузер уходит на форму ЮKassa, и если
+  // она не открылась (нет сети до yoomoney.ru, закрыли вкладку), ссылка не
+  // должна потеряться — держим её здесь же.
+  const [pending, setPending] = useState<PendingPayment | null>(() => loadPending(courseId))
+  const [checking, setChecking] = useState(false)
   // Состояние возврата с платёжной формы ЮKassa.
   const [returnState, setReturnState] = useState<'idle' | 'checking' | 'pending' | 'done'>(
     returnOrderId ? 'checking' : 'idle',
@@ -49,6 +100,7 @@ export default function CheckoutPage() {
         if (!active) return
         if (res.paid) {
           await refreshAccess()
+          clearPending(courseId)
           if (active) setReturnState('done')
         } else {
           setReturnState('pending')
@@ -58,7 +110,7 @@ export default function CheckoutPage() {
     return () => {
       active = false
     }
-  }, [returnOrderId, refreshAccess])
+  }, [returnOrderId, courseId, refreshAccess])
 
   if (!course) {
     return (
@@ -82,13 +134,54 @@ export default function CheckoutPage() {
         currency: 'RUB',
         customerEmail: email,
       })
-      // При успехе браузер уходит на платёжную форму ЮKassa.
-      if (result.status !== 'redirect') setError(result.message)
+      if (result.status !== 'redirect') {
+        setError(result.message)
+        return
+      }
+      // Ссылку сохраняем до перехода: если форма не откроется, человек вернётся
+      // на эту страницу и сможет открыть её заново или проверить оплату.
+      if (result.confirmationUrl) {
+        const info: PendingPayment = {
+          orderId: result.orderId,
+          url: result.confirmationUrl,
+          at: Date.now(),
+        }
+        savePending(courseId, info)
+        setPending(info)
+      }
     } catch {
       setError('Не удалось перейти к оплате. Попробуйте ещё раз.')
     } finally {
       setProcessing(false)
     }
+  }
+
+  // Проверить оплату по сохранённому заказу, не дожидаясь возврата с формы.
+  const checkPending = async () => {
+    if (!pending) return
+    setChecking(true)
+    setError('')
+    try {
+      const res = await api.payments.statusByOrder(pending.orderId)
+      if (res.paid) {
+        await refreshAccess()
+        clearPending(courseId)
+        setPending(null)
+        setReturnState('done')
+      } else {
+        setError('Платёж пока не подтверждён. Если вы его не завершили — откройте страницу оплаты.')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось проверить платёж.')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const cancelPending = () => {
+    clearPending(courseId)
+    setPending(null)
+    setError('')
   }
 
   // Оплатить программу может только авторизованный слушатель: доступ
@@ -177,6 +270,28 @@ export default function CheckoutPage() {
             Оплата проходит на защищённой странице ЮKassa. После подтверждения платежа доступ
             к программе откроется в вашем личном кабинете автоматически.
           </p>
+
+          {pending && (
+            <div className="mt-8 rounded-card border border-ocean/30 bg-oceanc-10 p-5">
+              <p className="text-sm font-semibold text-neft">Платёж уже создан · заказ {pending.orderId}</p>
+              <p className="mt-1.5 text-sm text-ink-60">
+                Если страница оплаты не открылась, откройте её по ссылке — например, с телефона.
+                Ссылка действует несколько часов. Уже оплатили — нажмите «Проверить оплату».
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button size="sm" onClick={() => window.location.assign(pending.url)}>
+                  Открыть страницу оплаты
+                </Button>
+                <Button size="sm" variant="secondary" disabled={checking} onClick={() => void checkPending()}>
+                  {checking ? 'Проверяем…' : 'Проверить оплату'}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={cancelPending}>
+                  Оформить заново
+                </Button>
+              </div>
+              <p className="mt-3 break-all text-[0.72rem] text-ink-40">{pending.url}</p>
+            </div>
+          )}
 
           <form onSubmit={submit} className="mt-8 space-y-5">
             <Input

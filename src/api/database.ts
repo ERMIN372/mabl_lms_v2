@@ -30,6 +30,16 @@ export interface NewDbUser {
   password: string
 }
 
+/** Состояние SMTP-отправки писем. */
+export interface MailStatus {
+  configured: boolean
+  host: string
+  port: number
+  user: string | null
+  from: string | null
+  siteUrl: string
+}
+
 /** Строка старых демо-данных, найденная в БД. */
 export interface DemoRow {
   section: string
@@ -65,6 +75,20 @@ export const databaseApi = {
 
   async init(): Promise<InitResult> {
     return http<InitResult>('/admin/db/init', { method: 'POST' })
+  },
+
+  /** Состояние отправки писем (SMTP). */
+  async mailStatus(): Promise<MailStatus> {
+    return http<MailStatus>('/admin/mail')
+  },
+
+  /** Отправить тестовое письмо на указанный адрес. */
+  async sendTestMail(email: string): Promise<string> {
+    const res = await http<{ message: string }>('/admin/mail/test', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    })
+    return res.message
   },
 
   /** Найти в БД остатки старых демо-данных (без удаления). */
