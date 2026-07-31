@@ -753,11 +753,93 @@ async function toggleReaction(newsId: string, req: VercelRequest, res: VercelRes
 
 // ---------------- admin participants (БД) ----------------
 
+/** Учебная статистика одного участника: его программы и средний прогресс. */
+interface ParticipantStats {
+  courseIds: string[]
+  avgProgress: number
+}
+
+/**
+ * Посчитать по всем участникам, на каких программах они реально учатся и какой
+ * у них средний прогресс.
+ *
+ * Считаем из фактов — оплаченных заказов и таблицы lesson_progress, — а не из
+ * полей записи участника: проставленные вручную числа устаревают в тот же день.
+ * Программа попадает в набор, если по ней есть оплата, ручная запись в профиле
+ * или хоть какой-то прогресс (так учитываются бесплатные программы, на которые
+ * слушателя никто не записывал). Прогресс по программе — среднее по её урокам,
+ * поэтому не начатая программа честно тянет средний вниз.
+ */
+async function participantStats(manual: AdminUser[]): Promise<Map<string, ParticipantStats>> {
+  const sql = getSql()
+  const [courseRows, orderRows, progressRows] = await Promise.all([
+    sql`SELECT data FROM courses`,
+    sql`SELECT data->>'userId' AS user_id, data->>'courseId' AS course_id FROM orders
+        WHERE data->>'status' = 'paid'`,
+    sql`SELECT user_id, course_id, lesson_id, progress FROM lesson_progress`,
+  ])
+
+  // Программа → число уроков: делитель для прогресса по программе.
+  const lessonCount = new Map<string, number>()
+  for (const row of courseRows) {
+    const course = row.data as Course
+    const count = (course.modules ?? []).reduce((sum, m) => sum + (m.lessons?.length ?? 0), 0)
+    lessonCount.set(course.id, count)
+  }
+
+  const sets = new Map<string, Set<string>>()
+  const enrol = (userId: string, courseId: string) => {
+    // Удалённую из каталога программу не показываем: заказ или прогресс по ней
+    // мог остаться, но учиться там уже негде.
+    if (!userId || !courseId || !lessonCount.has(courseId)) return
+    const set = sets.get(userId) ?? new Set<string>()
+    set.add(courseId)
+    sets.set(userId, set)
+  }
+  for (const user of manual) {
+    for (const courseId of user.enrolledCourseIds ?? []) enrol(user.id, courseId)
+  }
+  for (const row of orderRows) enrol(row.user_id as string, row.course_id as string)
+
+  // Сумма прогресса по урокам: пользователь → программа → сумма процентов.
+  const sums = new Map<string, Map<string, number>>()
+  for (const row of progressRows) {
+    const userId = row.user_id as string
+    const courseId = row.course_id as string
+    enrol(userId, courseId)
+    const byCourse = sums.get(userId) ?? new Map<string, number>()
+    byCourse.set(courseId, (byCourse.get(courseId) ?? 0) + Number(row.progress ?? 0))
+    sums.set(userId, byCourse)
+  }
+
+  const stats = new Map<string, ParticipantStats>()
+  for (const [userId, courseIds] of sets) {
+    const byCourse = sums.get(userId)
+    const total = Array.from(courseIds).reduce((sum, courseId) => {
+      const lessons = lessonCount.get(courseId) ?? 0
+      if (lessons === 0) return sum
+      return sum + Math.min(100, (byCourse?.get(courseId) ?? 0) / lessons)
+    }, 0)
+    stats.set(userId, {
+      courseIds: Array.from(courseIds),
+      avgProgress: courseIds.size > 0 ? Math.round(total / courseIds.size) : 0,
+    })
+  }
+  return stats
+}
+
 async function listParticipants(): Promise<AdminUser[]> {
   const sql = getSql()
   await ensureSchema(sql)
   const rows = await sql`SELECT data FROM participants ORDER BY sort_order ASC`
-  return rows.map((r) => r.data as AdminUser)
+  const participants = rows.map((r) => r.data as AdminUser)
+  // Программы и прогресс в списке — вычисляемые: показываем фактическое
+  // обучение, а не то, что когда-то сохранили в профиле.
+  const stats = await participantStats(participants)
+  return participants.map((user) => {
+    const own = stats.get(user.id)
+    return own ? { ...user, enrolledCourseIds: own.courseIds, avgProgress: own.avgProgress } : user
+  })
 }
 
 async function getParticipant(id: string): Promise<AdminUser | undefined> {
