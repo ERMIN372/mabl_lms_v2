@@ -6,6 +6,7 @@ import './index.css'
 import { AuthProvider } from './context/AuthContext'
 import { CoursesProvider } from './context/CoursesContext'
 import { PurchaseProvider } from './context/PurchaseContext'
+import { ProgressProvider } from './context/ProgressContext'
 import { NotificationsProvider } from './context/NotificationsContext'
 
 // Раньше SCORM-пакеты проигрывались через service worker (scorm-sw.js) — файлы
@@ -30,9 +31,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <AuthProvider>
         <CoursesProvider>
           <PurchaseProvider>
-            <NotificationsProvider>
-              <App />
-            </NotificationsProvider>
+            <ProgressProvider>
+              <NotificationsProvider>
+                <App />
+              </NotificationsProvider>
+            </ProgressProvider>
           </PurchaseProvider>
         </CoursesProvider>
       </AuthProvider>

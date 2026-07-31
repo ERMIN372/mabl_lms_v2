@@ -10,6 +10,7 @@ import { surveysApi } from './surveys'
 import { forumApi } from './forum'
 import { notificationsApi } from './notifications'
 import { scormApi } from './scorm'
+import { progressApi } from './progress'
 import { databaseApi } from './database'
 import { paymentsApi } from './payments'
 
@@ -32,10 +33,12 @@ export const api = {
   forum: forumApi,
   notifications: notificationsApi,
   scorm: scormApi,
+  progress: progressApi,
   database: databaseApi,
   payments: paymentsApi,
 }
 
 export { API_URL, ApiError } from './config'
 export type { ScormPackage, ScormDiagnostics } from './scorm'
+export type { LessonProgressInput } from './progress'
 export type { ApplicationDraft } from './applications'

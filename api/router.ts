@@ -6,6 +6,7 @@ import { findDemoRows, purgeDemoRows } from './_demo.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
 import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
+import { patchScormLaunchHtml } from './_scormPatch.mjs'
 import { handleUpload, handleUploadPresigned } from '@vercel/blob/client'
 import { list as blobList, del as blobDel, issueSignedToken, presignUrl } from '@vercel/blob'
 import type {
@@ -15,6 +16,7 @@ import type {
   Course,
   ForumSection,
   ForumTopic,
+  LessonProgress,
   Material,
   NewsItem,
   Order,
@@ -109,6 +111,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Программы, открытые текущему пользователю: только по оплаченным заказам.
     if (path === 'me/courses' && method === 'GET') {
       return res.json({ courseIds: await listAccessibleCourseIds(req) })
+    }
+
+    // ---------- ПРОГРЕСС ПРОХОЖДЕНИЯ ----------
+    // Прогресс персональный: и чтение, и запись идут только за пользователя из
+    // токена сессии — чужой userId клиент подставить не может.
+    if (path === 'me/progress' && method === 'GET') {
+      return await listMyProgress(req, res)
+    }
+    if (path === 'me/progress' && method === 'PUT') {
+      return await saveMyProgress(req, res)
     }
 
     // ---------- COURSES (БД) ----------
@@ -929,6 +941,88 @@ async function listAccessibleCourseIds(req: VercelRequest): Promise<string[]> {
   return Array.from(new Set(ids))
 }
 
+// ---------------- прогресс прохождения ----------------
+
+/** Строка lesson_progress → объект прогресса для клиента. */
+function progressFromRow(row: Record<string, unknown>): LessonProgress {
+  const score = row.score
+  return {
+    courseId: row.course_id as string,
+    lessonId: row.lesson_id as string,
+    progress: Number(row.progress ?? 0),
+    completed: Boolean(row.completed),
+    status: (row.status as string | null) ?? undefined,
+    score: score === null || score === undefined ? undefined : Number(score),
+    cmi: (row.cmi as Record<string, string> | null) ?? undefined,
+    updatedAt: new Date(row.updated_at as string).toISOString(),
+  }
+}
+
+/** GET /api/me/progress — весь прогресс текущего слушателя. */
+async function listMyProgress(req: VercelRequest, res: VercelResponse) {
+  const session = verifyToken(bearer(req))
+  if (!session) return res.status(401).json({ message: 'Требуется вход в личный кабинет.' })
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    SELECT course_id, lesson_id, progress, completed, status, score, cmi, updated_at
+    FROM lesson_progress WHERE user_id = ${session.id}
+  `
+  return res.json({ items: rows.map((r) => progressFromRow(r as Record<string, unknown>)) })
+}
+
+/**
+ * PUT /api/me/progress — сохранить прогресс урока.
+ *
+ * Прогресс и признак прохождения только растут: параллельно открытая вкладка со
+ * старым состоянием не должна откатывать результат. Поля, которых нет в запросе
+ * (например, снимок cmi при частом обновлении прогресса), сохраняют прежнее
+ * значение, а не затираются пустотой.
+ */
+async function saveMyProgress(req: VercelRequest, res: VercelResponse) {
+  const session = verifyToken(bearer(req))
+  if (!session) return res.status(401).json({ message: 'Требуется вход в личный кабинет.' })
+
+  const body = parseBody(req) as Partial<LessonProgress>
+  const courseId = String(body.courseId ?? '').trim()
+  const lessonId = String(body.lessonId ?? '').trim()
+  if (!courseId || !lessonId) {
+    return res.status(400).json({ message: 'Не указан урок программы.' })
+  }
+
+  const rawProgress = Number(body.progress)
+  const progress = Number.isFinite(rawProgress)
+    ? Math.round(Math.min(100, Math.max(0, rawProgress)))
+    : 0
+  const completed = Boolean(body.completed)
+  const status = body.status ? String(body.status).slice(0, 64) : null
+  const rawScore = Number(body.score)
+  const score = Number.isFinite(rawScore) ? rawScore : null
+  const cmi =
+    body.cmi && typeof body.cmi === 'object' && !Array.isArray(body.cmi)
+      ? JSON.stringify(body.cmi)
+      : null
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    INSERT INTO lesson_progress
+      (user_id, course_id, lesson_id, progress, completed, status, score, cmi, updated_at)
+    VALUES
+      (${session.id}, ${courseId}, ${lessonId}, ${progress}, ${completed}, ${status}, ${score},
+       ${cmi}::jsonb, NOW())
+    ON CONFLICT (user_id, course_id, lesson_id) DO UPDATE SET
+      progress = GREATEST(lesson_progress.progress, EXCLUDED.progress),
+      completed = lesson_progress.completed OR EXCLUDED.completed,
+      status = COALESCE(EXCLUDED.status, lesson_progress.status),
+      score = COALESCE(EXCLUDED.score, lesson_progress.score),
+      cmi = COALESCE(EXCLUDED.cmi, lesson_progress.cmi),
+      updated_at = NOW()
+    RETURNING course_id, lesson_id, progress, completed, status, score, cmi, updated_at
+  `
+  return res.json(progressFromRow(rows[0] as Record<string, unknown>))
+}
+
 // ---------------- payments (ЮKassa) ----------------
 
 /** Базовый URL сайта для return_url (из заголовков запроса или env). */
@@ -1551,7 +1645,13 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
     )
   }
 
-  const buf = Buffer.from(await upstream.arrayBuffer())
+  let buf = Buffer.from(await upstream.arrayBuffer())
+  // Точку входа пакета iSpring Page переключаем на SCORM 2004 — только в этом
+  // режиме пакет сообщает LMS свой прогресс прохождения (api/_scormPatch.mjs).
+  // Правим на отдаче, а не при загрузке: так чинятся и уже залитые пакеты.
+  if (/\.html?$/i.test(rel)) {
+    buf = Buffer.from(patchScormLaunchHtml(buf.toString('utf8')), 'utf8')
+  }
   res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
   res.setHeader('Cache-Control', 'public, max-age=3600')
   return res.status(200).send(buf)

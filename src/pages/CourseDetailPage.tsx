@@ -8,9 +8,10 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import { Crest } from '@/components/brand/Crest'
 import { Book, Check, Clipboard, Lock, Play } from '@/components/ui/Icon'
 import { ScormPlayer } from '@/components/ScormPlayer'
-import type { ScormStatus } from '@/components/ScormPlayer'
+import type { CmiData, ScormStatus } from '@/components/ScormPlayer'
 import { useCourses } from '@/context/CoursesContext'
 import { usePurchases } from '@/context/PurchaseContext'
+import { useProgress } from '@/context/ProgressContext'
 import { useAuth } from '@/context/AuthContext'
 import { formatPrice, formatDuration, displayTitle, cn } from '@/lib/utils'
 import { courseFormatLabel } from '@/lib/labels'
@@ -20,12 +21,17 @@ import type { Lesson } from '@/types'
 function LessonPlayer({
   lesson,
   student,
+  scormState,
   onScormStatus,
+  onScormCommit,
 }: {
   lesson: Lesson
   /** Слушатель, которому засчитывается прохождение тренинга. */
   student: { id: string; name: string }
+  /** Сохранённое состояние тренинга — с ним пакет продолжит с места остановки. */
+  scormState?: CmiData | null
   onScormStatus?: (s: ScormStatus) => void
+  onScormCommit?: (s: ScormStatus, data: CmiData) => void
 }) {
   if (lesson.format === 'video') {
     return (
@@ -49,10 +55,9 @@ function LessonPlayer({
           title={lesson.title}
           studentId={student.id}
           studentName={student.name}
-          // Прогресс хранится в браузере, поэтому ключ привязан к слушателю:
-          // на общем компьютере иначе виден чужой прогресс.
-          storageKey={`mabl.scorm.${student.id}.${lesson.id}`}
+          state={scormState}
           onStatus={onScormStatus}
+          onCommit={onScormCommit}
         />
       )
     }
@@ -89,9 +94,16 @@ function LessonPlayer({
 
 export default function CourseDetailPage() {
   const { id = '' } = useParams()
-  const { getCourseById, updateCourse } = useCourses()
+  const { getCourseById } = useCourses()
   const course = getCourseById(id)
   const { canAccessCourse } = usePurchases()
+  const {
+    loading: progressLoading,
+    courseProgress,
+    lessonProgress,
+    isLessonCompleted,
+    saveLessonProgress,
+  } = useProgress()
   const { user, isAuthenticated } = useAuth()
   // Материалы программы открываются только авторизованному слушателю с
   // оплаченным заказом (бесплатные программы — сразу после входа). Гость видит
@@ -101,21 +113,37 @@ export default function CourseDetailPage() {
   const firstLesson = course?.modules[0]?.lessons[0]
   const [activeLesson, setActiveLesson] = useState<Lesson | undefined>(firstLesson)
 
-  // Прогресс из SCORM: обновляем прогресс курса и отмечаем урок пройденным.
+  // Прогресс из SCORM пишем в персональный прогресс слушателя — из него же
+  // считается общий процент по программе на этой странице, в каталоге и в
+  // кабинете. Так число на странице совпадает с тем, что показывает сам пакет.
   const handleScormStatus = (s: ScormStatus) => {
     if (!course || !activeLesson) return
-    const current = course.progress ?? 0
-    const next = Math.max(current, s.progress)
-    const courseLesson = course.modules.flatMap((m) => m.lessons).find((l) => l.id === activeLesson.id)
-    const needComplete = s.completed && !courseLesson?.completed
-    if (next <= current && !needComplete) return
-    const modules = s.completed
-      ? course.modules.map((m) => ({
-          ...m,
-          lessons: m.lessons.map((l) => (l.id === activeLesson.id ? { ...l, completed: true } : l)),
-        }))
-      : course.modules
-    void updateCourse(course.id, { progress: next, modules })
+    saveLessonProgress({
+      courseId: course.id,
+      lessonId: activeLesson.id,
+      progress: s.progress,
+      completed: s.completed,
+      status: s.status,
+      score: s.score,
+    })
+  }
+
+  // Пакет попросил сохраниться — вместе с прогрессом кладём снимок cmi.*,
+  // чтобы тренинг продолжился с места остановки на любом устройстве.
+  const handleScormCommit = (s: ScormStatus, data: CmiData) => {
+    if (!course || !activeLesson) return
+    saveLessonProgress(
+      {
+        courseId: course.id,
+        lessonId: activeLesson.id,
+        progress: s.progress,
+        completed: s.completed,
+        status: s.status,
+        score: s.score,
+        cmi: data,
+      },
+      true,
+    )
   }
 
   if (!course) {
@@ -127,11 +155,9 @@ export default function CourseDetailPage() {
     )
   }
 
-  // Актуальный статус активного урока (из каталога, обновляется после SCORM).
-  const activeLessonFresh = course.modules
-    .flatMap((m) => m.lessons)
-    .find((l) => l.id === activeLesson?.id)
-  const lessonDone = activeLessonFresh?.completed ?? false
+  // Прохождение — персональное: смотрим прогресс слушателя, а не общее поле
+  // программы (оно одинаково для всех и прохождение не отражает).
+  const lessonDone = activeLesson ? isLessonCompleted(course.id, activeLesson.id) : false
 
   return (
     <div>
@@ -193,11 +219,21 @@ export default function CourseDetailPage() {
                     </div>
                   </div>
                 )}
-                <LessonPlayer
-                  lesson={activeLesson}
-                  student={{ id: user?.id ?? 'guest', name: user?.name || 'Слушатель' }}
-                  onScormStatus={handleScormStatus}
-                />
+                {/* Пакет запускаем, когда сохранённое состояние уже загружено:
+                    иначе тренинг стартует с нуля и затрёт прошлый прогресс. */}
+                {progressLoading ? (
+                  <div className="flex aspect-video items-center justify-center rounded-card border border-ink-10 bg-ink-5 text-sm text-ink-60">
+                    Загружаем ваш прогресс…
+                  </div>
+                ) : (
+                  <LessonPlayer
+                    lesson={activeLesson}
+                    student={{ id: user?.id ?? 'guest', name: user?.name || 'Слушатель' }}
+                    scormState={lessonProgress(course.id, activeLesson.id)?.cmi}
+                    onScormStatus={handleScormStatus}
+                    onScormCommit={handleScormCommit}
+                  />
+                )}
               </div>
             ) : (
               <div className="flex aspect-video flex-col items-center justify-center rounded-card border border-dashed border-ink-20 bg-ink-5 text-center">
@@ -235,6 +271,7 @@ export default function CourseDetailPage() {
                       {module.lessons.map((lesson) => {
                         const selectable = owned
                         const isActive = activeLesson?.id === lesson.id
+                        const done = isLessonCompleted(course.id, lesson.id)
                         return (
                           <li key={lesson.id}>
                             <button
@@ -248,9 +285,9 @@ export default function CourseDetailPage() {
                             >
                               <span className={cn(
                                 'flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-ink-40',
-                                lesson.completed ? 'border-ocean bg-oceanc-10 text-ocean' : 'border-ink-20',
+                                done ? 'border-ocean bg-oceanc-10 text-ocean' : 'border-ink-20',
                               )}>
-                                {lesson.completed ? <Check width={14} height={14} /> : <Book width={13} height={13} />}
+                                {done ? <Check width={14} height={14} /> : <Book width={13} height={13} />}
                               </span>
                               <span className="min-w-0 flex-1 text-sm text-neft">{lesson.title}</span>
                               <span className="shrink-0"><Badge tone="outline">{courseFormatLabel[lesson.format]}</Badge></span>
@@ -274,7 +311,7 @@ export default function CourseDetailPage() {
                 {owned ? (
                   <>
                     <p className="eyebrow mb-4">Ваш прогресс</p>
-                    <ProgressBar value={course.progress} showLabel />
+                    <ProgressBar value={courseProgress(course)} showLabel />
                     <Button fullWidth className="mt-6">
                       Продолжить обучение
                     </Button>

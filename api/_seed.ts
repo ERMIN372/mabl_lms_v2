@@ -101,6 +101,24 @@ export async function ensureSchema(sql: Sql): Promise<void> {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `
+  // Прогресс прохождения — персонально по каждому уроку каждого слушателя.
+  // Здесь же лежит снимок модели данных SCORM (cmi.*): по нему пакет
+  // продолжает с места остановки на любом устройстве.
+  await sql`
+    CREATE TABLE IF NOT EXISTS lesson_progress (
+      user_id TEXT NOT NULL,
+      course_id TEXT NOT NULL,
+      lesson_id TEXT NOT NULL,
+      progress INT NOT NULL DEFAULT 0,
+      completed BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT,
+      score REAL,
+      cmi JSONB,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, course_id, lesson_id)
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_lesson_progress_user ON lesson_progress (user_id)`
   // Универсальное хранилище коллекций контента (события, материалы, опросники,
   // разделы и темы форума, уведомления). Ключ — пара (collection, id).
   await sql`

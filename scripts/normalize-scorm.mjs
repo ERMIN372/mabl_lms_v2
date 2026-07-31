@@ -1,14 +1,18 @@
 /**
  * Нормализация SCORM-пакетов в public/scorm перед сборкой.
  *
- * Экспорт iSpring иногда кладёт скрипты с «обрезанным» расширением (`.j_`
- * вместо `.js`) — так некоторые системы обходят фильтры загрузки. При этом
- * index.html пакета запрашивает обычные `.js`, поэтому ни один скрипт плеера
- * не загружается и курс показывает пустой экран. Здесь возвращаем расширения
- * на место. Скрипт идемпотентный: если переименовывать нечего, ничего не делает.
+ * 1. Экспорт iSpring иногда кладёт скрипты с «обрезанным» расширением (`.j_`
+ *    вместо `.js`) — так некоторые системы обходят фильтры загрузки. При этом
+ *    index.html пакета запрашивает обычные `.js`, поэтому ни один скрипт плеера
+ *    не загружается и курс показывает пустой экран. Возвращаем расширения на место.
+ * 2. Пакеты iSpring Page переключаем на модель данных SCORM 2004 — иначе они не
+ *    сообщают LMS свой прогресс прохождения (см. api/_scormPatch.mjs).
+ *
+ * Скрипт идемпотентный: если менять нечего, ничего не делает.
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { patchScormLaunchHtml } from '../api/_scormPatch.mjs'
 
 const ROOT = path.join(process.cwd(), 'public', 'scorm')
 
@@ -49,4 +53,19 @@ for (const file of walk(ROOT)) {
 
 if (renamed > 0) {
   console.log(`[scorm] восстановлено расширений у файлов пакетов: ${renamed}`)
+}
+
+// Точки входа пакетов (после возможного переименования) переводим на SCORM 2004.
+let switched = 0
+for (const file of walk(ROOT)) {
+  if (!/\.html?$/i.test(file)) continue
+  const html = fs.readFileSync(file, 'utf8')
+  const patched = patchScormLaunchHtml(html)
+  if (patched === html) continue
+  fs.writeFileSync(file, patched)
+  switched += 1
+}
+
+if (switched > 0) {
+  console.log(`[scorm] переключено пакетов на модель данных SCORM 2004: ${switched}`)
 }
