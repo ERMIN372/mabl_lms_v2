@@ -7,8 +7,10 @@ import { initDatabase } from './_seed.js'
  *
  *   POST /api/setup?secret=<SETUP_SECRET>
  *
- * Создаёт таблицы и заливает сид-данные. Та же логика доступна из админ-панели
- * (POST /api/admin/db/init) — этот файл нужен только для первого запуска по секрету.
+ * Создаёт таблицы и стартовый аккаунт администратора. Никакого контента в базу
+ * не записывается — всё наполняется из админ-панели. Та же логика доступна из
+ * админки (POST /api/admin/db/init); этот файл нужен для первого запуска по
+ * секрету, когда админского аккаунта ещё нет.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
@@ -22,8 +24,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const sql = getSql()
-    const counts = await initDatabase(sql)
-    return res.status(200).json({ ok: true, message: 'База данных инициализирована', counts })
+    const { courses, users, ...admin } = await initDatabase(sql)
+    // adminPassword есть только если аккаунт создан этим вызовом, а
+    // ADMIN_PASSWORD не задан: показывается один раз, в базе только хэш.
+    return res.status(200).json({
+      ok: true,
+      message: 'База данных инициализирована',
+      counts: { courses, users },
+      ...admin,
+    })
   } catch (err: unknown) {
     console.error('Setup error:', err)
     const message = err instanceof Error ? err.message : String(err)
