@@ -6,6 +6,7 @@ import { AppLayout } from './components/layout/AppLayout'
 
 import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 import CheckoutPage from './pages/CheckoutPage'
 import CoursesPage from './pages/CoursesPage'
 import CourseDetailPage from './pages/CourseDetailPage'
@@ -92,6 +93,7 @@ export default function App() {
 
         {/* Аутентификация (без общего каркаса) */}
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
 
         {/* Личный кабинет слушателя (защищённая зона) */}
         <Route element={<AppLayout />}>

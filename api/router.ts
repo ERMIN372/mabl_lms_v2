@@ -1,6 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
+import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 import { getSql } from './_db.js'
+import { mailConfigProblems, mailTransport, passwordResetMessage, sendMail } from './_mail.js'
 import { ensureSchema, initDatabase } from './_seed.js'
 import { findDemoRows, purgeDemoRows } from './_demo.js'
 import { syncTelegramNews } from './_telegram.js'
@@ -73,6 +75,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     path === 'auth/login' ||
     path === 'auth/register' ||
     path === 'auth/recover' ||
+    path === 'auth/reset' ||
     // Оплату инициирует слушатель: права проверяются внутри обработчика по
     // токену сессии (а не по правам администратора).
     path === 'payments/create' ||
@@ -98,11 +101,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return await register(req, res)
     }
     if (path === 'auth/recover' && method === 'POST') {
-      const { email } = parseBody(req)
-      if (!email || !String(email).includes('@')) {
-        return res.status(400).json({ message: 'Укажите корректный e-mail.' })
-      }
-      return res.json({ message: `Инструкция по восстановлению доступа отправлена на ${email}.` })
+      return await recoverPassword(req, res)
+    }
+    if (path === 'auth/reset' && method === 'POST') {
+      return await resetPassword(req, res)
     }
 
     // ---------- ДОСТУП ПОЛЬЗОВАТЕЛЯ ----------
@@ -286,6 +288,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ---------- PROFILE ----------
     if (path === 'admin/profile' && method === 'PATCH') {
       return await updateProfile(req, res)
+    }
+
+    // ---------- ПОЧТА (диагностика настроек отправки) ----------
+    // Показывает, каким транспортом уходят письма и чего не хватает в
+    // переменных окружения. Секреты не отдаём — только имена и адрес отправителя.
+    if (path === 'admin/mail' && method === 'GET') {
+      const problems = mailConfigProblems()
+      return res.json({
+        transport: mailTransport(),
+        from: process.env.MAIL_FROM || process.env.SMTP_USER || null,
+        host: process.env.SMTP_HOST || null,
+        port: process.env.SMTP_HOST ? Number(process.env.SMTP_PORT || 465) : null,
+        configured: problems.length === 0,
+        problems,
+      })
     }
 
     // ---------- DATABASE (управление БД из админки) ----------
@@ -539,6 +556,143 @@ async function register(req: VercelRequest, res: VercelResponse) {
 
   const user: User = { id, name, email, role, kind: 'student' }
   return res.status(201).json({ ...user, token: signToken({ id, kind: 'student' }) })
+}
+
+/** Сколько живёт ссылка восстановления пароля. */
+const RESET_TTL_HOURS = 2
+
+/** Хэш токена восстановления: в базе храним только его. */
+function hashResetToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex')
+}
+
+/**
+ * POST /api/auth/recover
+ * Тело: { email }. Заводит одноразовый токен и отправляет на почту письмо со
+ * ссылкой на страницу смены пароля.
+ *
+ * Ответ одинаков для существующего и несуществующего адреса — по нему нельзя
+ * перебором узнать, кто зарегистрирован в академии. Зато если почта не настроена
+ * или SMTP отвечает ошибкой, эндпоинт честно отдаёт ошибку: молчаливое «письмо
+ * отправлено» при неработающей отправке — ровно тот случай, из-за которого
+ * восстановление казалось рабочим, а инструкция не приходила.
+ */
+async function recoverPassword(req: VercelRequest, res: VercelResponse) {
+  const { email } = parseBody(req)
+  const normalized = String(email ?? '').trim().toLowerCase()
+  if (!normalized.includes('@')) {
+    return res.status(400).json({ message: 'Укажите корректный e-mail.' })
+  }
+
+  const problems = mailConfigProblems()
+  if (problems.length > 0) {
+    console.error(`[auth/recover] отправка писем не настроена: ${problems.join(' ')}`)
+    return res.status(503).json({
+      message:
+        'Отправка писем на сервере не настроена, поэтому инструкция не уйдёт. ' +
+        'Администратору: задайте переменные окружения почты (SMTP_HOST, SMTP_USER, ' +
+        'SMTP_PASSWORD, MAIL_FROM) и повторите попытку.',
+    })
+  }
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`SELECT id, name, email FROM users WHERE email = ${normalized} LIMIT 1`
+  const user = rows[0]
+
+  const okMessage = {
+    message:
+      `Если аккаунт с адресом ${normalized} существует, инструкция по восстановлению уже отправлена. ` +
+      'Проверьте входящие и папку «Спам» — ссылка действует 2 часа.',
+  }
+
+  // Адреса нет в базе — отвечаем так же, как при успехе, но письмо не шлём.
+  if (!user) {
+    console.log(`[auth/recover] запрос для незарегистрированного адреса ${normalized}`)
+    return res.json(okMessage)
+  }
+
+  // Прошлые ссылки этого пользователя гасим: активной остаётся только последняя.
+  await sql`
+    UPDATE password_resets SET used_at = NOW()
+    WHERE user_id = ${user.id as string} AND used_at IS NULL
+  `
+
+  const token = crypto.randomBytes(32).toString('base64url')
+  const expiresAt = new Date(Date.now() + RESET_TTL_HOURS * 60 * 60 * 1000)
+  await sql`
+    INSERT INTO password_resets (token_hash, user_id, expires_at)
+    VALUES (${hashResetToken(token)}, ${user.id as string}, ${expiresAt.toISOString()})
+  `
+
+  const link = `${siteOrigin(req)}/reset-password?token=${encodeURIComponent(token)}`
+  try {
+    await sendMail(
+      passwordResetMessage({
+        to: user.email as string,
+        name: (user.name as string) || '',
+        link,
+        ttlHours: RESET_TTL_HOURS,
+      }),
+    )
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    // Токен больше не нужен: письмо не ушло, ссылку никто не получил.
+    await sql`UPDATE password_resets SET used_at = NOW() WHERE user_id = ${user.id as string} AND used_at IS NULL`
+    return res.status(502).json({
+      message: `Не удалось отправить письмо: ${reason}. Проверьте настройки почты на сервере.`,
+    })
+  }
+
+  return res.json(okMessage)
+}
+
+/**
+ * POST /api/auth/reset
+ * Тело: { token, password }. Меняет пароль по одноразовой ссылке из письма и
+ * сразу выдаёт токен сессии — после смены пароля пользователь уже внутри.
+ */
+async function resetPassword(req: VercelRequest, res: VercelResponse) {
+  const body = parseBody(req)
+  const token = String(body.token ?? '')
+  const password = String(body.password ?? '')
+  if (!token) return res.status(400).json({ message: 'Ссылка восстановления неполная — откройте её из письма целиком.' })
+  if (password.length < 8) {
+    return res.status(400).json({ message: 'Пароль должен быть не короче 8 символов.' })
+  }
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    SELECT user_id, expires_at, used_at FROM password_resets
+    WHERE token_hash = ${hashResetToken(token)} LIMIT 1
+  `
+  const reset = rows[0]
+  const expired = reset && new Date(reset.expires_at as string).getTime() < Date.now()
+  if (!reset || reset.used_at || expired) {
+    return res.status(400).json({
+      message: 'Ссылка восстановления недействительна или уже использована. Запросите новую на странице входа.',
+    })
+  }
+
+  const userRows = await sql`
+    SELECT id, name, email, role, kind FROM users WHERE id = ${reset.user_id as string} LIMIT 1
+  `
+  const row = userRows[0]
+  if (!row) return res.status(400).json({ message: 'Аккаунт не найден.' })
+
+  const hash = await bcrypt.hash(password, 10)
+  await sql`UPDATE users SET password_hash = ${hash} WHERE id = ${row.id as string}`
+  await sql`UPDATE password_resets SET used_at = NOW() WHERE token_hash = ${hashResetToken(token)}`
+
+  const user: User = {
+    id: row.id as string,
+    name: row.name as string,
+    email: row.email as string,
+    role: row.role as string,
+    kind: (row.kind as User['kind']) ?? 'student',
+  }
+  return res.json({ ...user, token: signToken({ id: user.id, kind: user.kind }) })
 }
 
 async function listCourses(): Promise<Course[]> {
@@ -931,8 +1085,12 @@ async function listAccessibleCourseIds(req: VercelRequest): Promise<string[]> {
 
 // ---------------- payments (ЮKassa) ----------------
 
-/** Базовый URL сайта для return_url (из заголовков запроса или env). */
+/**
+ * Базовый URL сайта (ссылки в письмах, return_url оплаты). Берётся из SITE_URL,
+ * затем из YOOKASSA_RETURN_URL, иначе — из заголовков запроса.
+ */
 function siteOrigin(req: VercelRequest): string {
+  if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, '')
   if (process.env.YOOKASSA_RETURN_URL) return process.env.YOOKASSA_RETURN_URL.replace(/\/$/, '')
   const proto = (req.headers['x-forwarded-proto'] as string) || 'https'
   const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost'

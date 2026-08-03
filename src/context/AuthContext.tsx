@@ -34,6 +34,8 @@ interface AuthContextValue {
   register: (input: { name: string; email: string; password: string }) => Promise<User>
   logout: () => void
   recover: (email: string) => Promise<string>
+  /** Задать новый пароль по ссылке из письма: сервер сразу открывает сессию. */
+  resetPassword: (token: string, password: string) => Promise<User>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -72,6 +74,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const recover = (email: string) => api.auth.recover(email)
 
+  const resetPassword = async (token: string, password: string) => {
+    const account = await api.auth.reset(token, password)
+    setUser(account)
+    return account
+  }
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
@@ -81,6 +89,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       register,
       logout,
       recover,
+      resetPassword,
     }),
     [user],
   )

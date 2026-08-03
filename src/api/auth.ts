@@ -28,11 +28,26 @@ export const authApi = {
     return user
   },
 
+  /** Запросить письмо со ссылкой на смену пароля. */
   async recover(email: string): Promise<string> {
     return http<{ message: string }>('/auth/recover', {
       method: 'POST',
       body: JSON.stringify({ email }),
     }).then((r) => r.message)
+  },
+
+  /**
+   * Задать новый пароль по одноразовому токену из письма. Сервер сразу выдаёт
+   * токен сессии — после смены пароля пользователь уже авторизован.
+   */
+  async reset(token: string, password: string): Promise<User> {
+    const res = await http<User & { token?: string }>('/auth/reset', {
+      method: 'POST',
+      body: JSON.stringify({ token, password }),
+    })
+    if (res.token) setToken(res.token)
+    const { token: _token, ...user } = res
+    return user
   },
 
   /** Завершить сессию: убрать токен. */

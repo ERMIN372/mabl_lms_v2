@@ -55,6 +55,18 @@ export async function ensureSchema(sql: Sql): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `
+  // Одноразовые ссылки восстановления пароля. В базе лежит только хэш токена:
+  // из дампа таблицы нельзя собрать рабочую ссылку.
+  await sql`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets (user_id, created_at)`
   await sql`
     CREATE TABLE IF NOT EXISTS news (
       id TEXT PRIMARY KEY,
