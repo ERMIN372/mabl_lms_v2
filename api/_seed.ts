@@ -34,6 +34,93 @@ function generatePassword(): string {
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('')
 }
 
+/** Колонки таблицы password_resets, которыми пользуется восстановление пароля. */
+const PASSWORD_RESET_COLUMNS = ['token_hash', 'user_id', 'expires_at', 'used_at', 'created_at']
+
+/** Имя объекта БД в кавычках: имена колонок подставляются в DDL как есть. */
+function quoteIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`
+}
+
+/**
+ * Одноразовые ссылки восстановления пароля. В базе лежит только SHA-256-хэш
+ * токена: из дампа таблицы рабочую ссылку не собрать.
+ *
+ * `CREATE TABLE IF NOT EXISTS` не меняет уже существующую таблицу, поэтому
+ * таблица с тем же именем, но другой структурой ломает вставку. В базе МАБЛ
+ * нашлась ровно такая: с обязательной колонкой email от прежней версии —
+ * восстановление падало с «null value in column "email" violates not-null
+ * constraint». Приводим таблицу к нужному виду, ничего не удаляя: недостающие
+ * колонки добавляем, с чужими обязательными снимаем NOT NULL. Пересоздание —
+ * только если иначе никак (например, обязательная колонка входит в первичный
+ * ключ); данных в таблице не жалко: это невостребованные ссылки, пользователь
+ * просто запросит восстановление заново.
+ */
+async function ensurePasswordResetsTable(sql: Sql): Promise<void> {
+  const columnTypes: Record<string, string> = {
+    token_hash: 'TEXT',
+    user_id: 'TEXT',
+    expires_at: 'TIMESTAMPTZ',
+    used_at: 'TIMESTAMPTZ',
+    created_at: 'TIMESTAMPTZ DEFAULT NOW()',
+  }
+
+  const columns = await sql`
+    SELECT column_name, is_nullable, column_default
+    FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'password_resets'
+  `
+
+  if (columns.length > 0) {
+    const names = columns.map((c) => c.column_name as string)
+
+    // Недостающие колонки добавляем: существующие строки не трогаются.
+    for (const name of PASSWORD_RESET_COLUMNS) {
+      if (names.includes(name)) continue
+      console.log(`[schema] password_resets: добавляю колонку ${name}`)
+      await sql.query(
+        `ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS ${quoteIdent(name)} ${columnTypes[name]}`,
+      )
+    }
+
+    // Чужие обязательные колонки без значения по умолчанию: вставка из нашего
+    // кода их не заполняет, поэтому снимаем NOT NULL.
+    const unresolved: string[] = []
+    for (const column of columns) {
+      const name = column.column_name as string
+      if (PASSWORD_RESET_COLUMNS.includes(name)) continue
+      if (column.is_nullable !== 'NO' || column.column_default !== null) continue
+      try {
+        console.log(`[schema] password_resets: снимаю NOT NULL с колонки ${name}`)
+        await sql.query(`ALTER TABLE password_resets ALTER COLUMN ${quoteIdent(name)} DROP NOT NULL`)
+      } catch {
+        // Колонка в первичном ключе — NOT NULL с неё не снять.
+        unresolved.push(name)
+      }
+    }
+
+    // Уникальность token_hash нужна, чтобы UPDATE по токену бил ровно в одну
+    // строку; в пересозданной таблице это первичный ключ, в доращённой — индекс.
+    if (unresolved.length > 0) {
+      console.log(`[schema] password_resets пересоздаётся: не удалось исправить [${unresolved.join(', ')}]`)
+      await sql`DROP TABLE password_resets`
+    } else if (!names.includes('token_hash')) {
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets (token_hash)`
+    }
+  }
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets (user_id, created_at)`
+}
+
 /** Создаёт таблицы, если их ещё нет. */
 export async function ensureSchema(sql: Sql): Promise<void> {
   await sql`
@@ -55,18 +142,7 @@ export async function ensureSchema(sql: Sql): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `
-  // Одноразовые ссылки восстановления пароля. В базе лежит только хэш токена:
-  // из дампа таблицы нельзя собрать рабочую ссылку.
-  await sql`
-    CREATE TABLE IF NOT EXISTS password_resets (
-      token_hash TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      expires_at TIMESTAMPTZ NOT NULL,
-      used_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `
-  await sql`CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets (user_id, created_at)`
+  await ensurePasswordResetsTable(sql)
   await sql`
     CREATE TABLE IF NOT EXISTS news (
       id TEXT PRIMARY KEY,
