@@ -9,6 +9,7 @@ import { materialsApi } from './materials'
 import { surveysApi } from './surveys'
 import { forumApi } from './forum'
 import { notificationsApi } from './notifications'
+import { progressApi } from './progress'
 import { scormApi } from './scorm'
 import { databaseApi } from './database'
 import { paymentsApi } from './payments'
@@ -31,6 +32,7 @@ export const api = {
   surveys: surveysApi,
   forum: forumApi,
   notifications: notificationsApi,
+  progress: progressApi,
   scorm: scormApi,
   database: databaseApi,
   payments: paymentsApi,
@@ -39,3 +41,4 @@ export const api = {
 export { API_URL, ApiError } from './config'
 export type { ScormPackage, ScormDiagnostics } from './scorm'
 export type { ApplicationDraft } from './applications'
+export type { LessonProgressPatch } from './progress'

@@ -15,11 +15,13 @@ import type {
   Course,
   ForumSection,
   ForumTopic,
+  LessonProgress,
   Material,
   NewsItem,
   Order,
   OrderStatus,
   ProgramApplication,
+  ScormCmi,
   Survey,
   User,
 } from '../src/types'
@@ -82,6 +84,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // по токену из clientPayload.
     path === 'scorm/blob-upload' ||
     path === 'materials/blob-upload' ||
+    // Раздел me/* слушатель пишет сам (свой прогресс прохождения): права
+    // проверяются внутри обработчика по токену сессии, а не по правам
+    // администратора. Запись всегда привязана к id из токена — подставить
+    // чужой идентификатор нельзя.
+    segments[0] === 'me' ||
     // Заявку на поступление оставляет любой посетитель страницы программы —
     // авторизация здесь не требуется по определению.
     path === 'applications' ||
@@ -109,6 +116,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Программы, открытые текущему пользователю: только по оплаченным заказам.
     if (path === 'me/courses' && method === 'GET') {
       return res.json({ courseIds: await listAccessibleCourseIds(req) })
+    }
+
+    // ---------- ПРОГРЕСС ПРОХОЖДЕНИЯ (свой у каждого слушателя) ----------
+    if (segments[0] === 'me' && segments[1] === 'progress') {
+      const session = verifyToken(bearer(req))
+      if (!session) {
+        return res.status(401).json({ message: 'Войдите в личный кабинет, чтобы сохранять прогресс.' })
+      }
+      if (segments.length === 2 && method === 'GET') {
+        return res.json(await listLessonProgress(session.id))
+      }
+      if (segments.length === 4) {
+        const [, , courseId, lessonId] = segments
+        if (method === 'GET') {
+          const record = await getLessonProgress(session.id, courseId, lessonId)
+          return res.json(record ?? null)
+        }
+        if (method === 'PUT') {
+          return await saveLessonProgress(session.id, courseId, lessonId, req, res)
+        }
+      }
     }
 
     // ---------- COURSES (БД) ----------
@@ -929,6 +957,109 @@ async function listAccessibleCourseIds(req: VercelRequest): Promise<string[]> {
   return Array.from(new Set(ids))
 }
 
+// ---------------- прогресс прохождения ----------------
+
+/** Максимальный размер снимка CMI: cmi.suspend_data по SCORM 2004 — 64 000 символов. */
+const CMI_LIMIT = 128 * 1024
+
+function progressRow(row: Record<string, unknown>): LessonProgress {
+  return {
+    courseId: String(row.course_id),
+    lessonId: String(row.lesson_id),
+    status: String(row.status ?? 'not attempted'),
+    score: row.score === null || row.score === undefined ? undefined : Number(row.score),
+    progress: Number(row.progress ?? 0),
+    completed: Boolean(row.completed),
+    cmi: (row.cmi as ScormCmi) ?? {},
+    updatedAt: row.updated_at ? new Date(row.updated_at as string).toISOString() : '',
+  }
+}
+
+/** Весь прогресс слушателя — одним запросом для кабинета и каталога. */
+async function listLessonProgress(userId: string): Promise<LessonProgress[]> {
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    SELECT course_id, lesson_id, status, score, progress, completed, cmi, updated_at
+    FROM lesson_progress WHERE user_id = ${userId}
+  `
+  return rows.map(progressRow)
+}
+
+/** Прогресс по одному уроку — из него SCORM-плеер восстанавливает состояние. */
+async function getLessonProgress(
+  userId: string,
+  courseId: string,
+  lessonId: string,
+): Promise<LessonProgress | null> {
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    SELECT course_id, lesson_id, status, score, progress, completed, cmi, updated_at
+    FROM lesson_progress
+    WHERE user_id = ${userId} AND course_id = ${courseId} AND lesson_id = ${lessonId}
+    LIMIT 1
+  `
+  return rows[0] ? progressRow(rows[0]) : null
+}
+
+/**
+ * Сохранить прогресс урока.
+ *
+ * Доля пройденного не уменьшается, а признак «пройден» не снимается: пакет,
+ * запущенный заново, в начале сессии сообщает нулевой прогресс и статус
+ * «incomplete» — принимать это за откат назад было бы неверно. Снимок cmi при
+ * этом всегда перезаписывается: это состояние текущей попытки, по нему пакет
+ * продолжает с места остановки.
+ */
+async function saveLessonProgress(
+  userId: string,
+  courseId: string,
+  lessonId: string,
+  req: VercelRequest,
+  res: VercelResponse,
+) {
+  const body = parseBody(req) as {
+    cmi?: ScormCmi
+    status?: string
+    score?: number | null
+    progress?: number
+    completed?: boolean
+  }
+  const cmi: ScormCmi = {}
+  for (const [key, value] of Object.entries(body.cmi ?? {})) {
+    if (key.startsWith('cmi.') || key.startsWith('adl.')) cmi[key] = String(value ?? '')
+  }
+  const cmiJson = JSON.stringify(cmi)
+  if (cmiJson.length > CMI_LIMIT) {
+    return res.status(413).json({ message: 'Состояние SCORM слишком велико для сохранения.' })
+  }
+
+  const status = typeof body.status === 'string' && body.status ? body.status.slice(0, 64) : 'not attempted'
+  const score = typeof body.score === 'number' && Number.isFinite(body.score) ? body.score : null
+  const progress = Math.min(100, Math.max(0, Math.round(Number(body.progress) || 0)))
+  const completed = Boolean(body.completed)
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    INSERT INTO lesson_progress (user_id, course_id, lesson_id, cmi, status, score, progress, completed, updated_at)
+    VALUES (${userId}, ${courseId}, ${lessonId}, ${cmiJson}::jsonb, ${status}, ${score}, ${progress}, ${completed}, NOW())
+    ON CONFLICT (user_id, course_id, lesson_id) DO UPDATE SET
+      cmi = EXCLUDED.cmi,
+      status = CASE
+        WHEN lesson_progress.completed AND NOT EXCLUDED.completed THEN lesson_progress.status
+        ELSE EXCLUDED.status
+      END,
+      score = COALESCE(EXCLUDED.score, lesson_progress.score),
+      progress = GREATEST(lesson_progress.progress, EXCLUDED.progress),
+      completed = lesson_progress.completed OR EXCLUDED.completed,
+      updated_at = NOW()
+    RETURNING course_id, lesson_id, status, score, progress, completed, cmi, updated_at
+  `
+  return res.json(progressRow(rows[0]))
+}
+
 // ---------------- payments (ЮKassa) ----------------
 
 /** Базовый URL сайта для return_url (из заголовков запроса или env). */
@@ -1111,6 +1242,7 @@ async function dbStatus(res: VercelResponse) {
   await ensureSchema(sql)
   const [{ count: coursesCount }] = await sql`SELECT COUNT(*)::int AS count FROM courses`
   const [{ count: usersCount }] = await sql`SELECT COUNT(*)::int AS count FROM users`
+  const [{ count: progressCount }] = await sql`SELECT COUNT(*)::int AS count FROM lesson_progress`
   const users = await sql`
     SELECT id, name, email, role, kind, created_at
     FROM users ORDER BY created_at ASC
@@ -1119,6 +1251,7 @@ async function dbStatus(res: VercelResponse) {
     tables: [
       { name: 'courses', label: 'Программы', rows: Number(coursesCount) },
       { name: 'users', label: 'Аккаунты', rows: Number(usersCount) },
+      { name: 'lesson_progress', label: 'Прогресс прохождения', rows: Number(progressCount) },
     ],
     users: users.map((u) => ({
       id: u.id,
@@ -1551,10 +1684,50 @@ async function serveScormFile(id: string, rel: string, res: VercelResponse) {
     )
   }
 
-  const buf = Buffer.from(await upstream.arrayBuffer())
+  let buf = Buffer.from(await upstream.arrayBuffer())
+  if (/\.html?$/i.test(rel)) {
+    const patched = patchScormLaunchHtml(buf.toString('utf8'))
+    if (patched) buf = Buffer.from(patched, 'utf8')
+  }
   res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
   res.setHeader('Cache-Control', 'public, max-age=3600')
   return res.status(200).send(buf)
+}
+
+/**
+ * Переключить точку входа пакета iSpring со SCORM 1.2 на SCORM 2004.
+ *
+ * В режиме 1.2 коннектор iSpring не сообщает LMS долю пройденного вовсе (метод
+ * setProgress там пустой) — модель данных SCORM 1.2 такого поля не имеет. LMS
+ * видит только «не начат / завершён», поэтому пакет показывал у себя внутри,
+ * например, 41%, а на сайте прогресс оставался 0% до самого конца курса.
+ *
+ * Тот же коннектор в режиме SCORM 2004 шлёт cmi.progress_measure — ровно ту
+ * долю, которую пакет рисует у себя в панели. Заодно поднимаем редакцию до
+ * четвёртой: лимит cmi.suspend_data 64 000 символов вместо 4 000 во второй
+ * (во второй редакции коннектор молча выбрасывает состояние сверх лимита).
+ *
+ * Возвращает null, если менять нечего: страница не от iSpring или уже 2004.
+ * Замена идемпотентна — повторный вызов ничего не делает.
+ */
+export function patchScormLaunchHtml(html: string): string | null {
+  if (!html.includes('iSpring.roll.LMS.create')) return null
+  let changed = false
+  const next = html.replace(
+    /(iSpring\.roll\.LMS\.create\(\s*)(\{[^{}]*\})/g,
+    (match: string, head: string, config: string) => {
+      if (!/"apiVersion"\s*:\s*"scorm12"/.test(config)) return match
+      changed = true
+      const rest = config
+        .slice(1, -1)
+        .replace(/"apiVersion"\s*:\s*"scorm12"\s*,?/, '')
+        .replace(/"edition"\s*:\s*"[^"]*"\s*,?/, '')
+        .replace(/^\s*,|,\s*$/g, '')
+        .trim()
+      return `${head}{"apiVersion":"scorm2004","edition":"4"${rest ? `,${rest}` : ''}}`
+    },
+  )
+  return changed ? next : null
 }
 
 /**

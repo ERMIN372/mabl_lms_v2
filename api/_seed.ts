@@ -114,6 +114,30 @@ export async function ensureSchema(sql: Sql): Promise<void> {
     )
   `
   await sql`CREATE INDEX IF NOT EXISTS idx_content_collection ON content (collection, sort_order)`
+  // Прогресс прохождения — по записи на (слушатель, программа, урок).
+  //
+  // Прогресс персональный, поэтому он НЕ хранится в courses.data: там лежит
+  // общий для всех каталог программ, и запись прогресса туда означала бы, что
+  // все слушатели видят прогресс друг друга (а обычному слушателю сервер и не
+  // даст менять каталог — курсы правит только администратор).
+  //
+  // cmi — полный снимок модели данных SCORM (включая cmi.suspend_data), чтобы
+  // пакет продолжался с того же места на любом устройстве.
+  await sql`
+    CREATE TABLE IF NOT EXISTS lesson_progress (
+      user_id TEXT NOT NULL,
+      course_id TEXT NOT NULL,
+      lesson_id TEXT NOT NULL,
+      cmi JSONB NOT NULL DEFAULT '{}'::jsonb,
+      status TEXT NOT NULL DEFAULT 'not attempted',
+      score DOUBLE PRECISION,
+      progress INT NOT NULL DEFAULT 0,
+      completed BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, course_id, lesson_id)
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_lesson_progress_user ON lesson_progress (user_id)`
 }
 
 /** Инициализация: схема + стартовый администратор (без перезаписи существующих данных). */
