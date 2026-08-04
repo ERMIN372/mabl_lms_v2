@@ -159,6 +159,19 @@ export async function ensureSchema(sql: Sql): Promise<void> {
   `
   await sql`CREATE INDEX IF NOT EXISTS idx_email_codes_user ON email_codes (user_id, created_at DESC)`
   await sql`CREATE INDEX IF NOT EXISTS idx_email_codes_email ON email_codes (email, created_at DESC)`
+  // Счётчики частоты запросов: одна строка на пару «действие + ключ».
+  // Растёт числом различных ключей, а не запросов; отжившие строки убирает
+  // ежедневная уборка (см. purgeStaleRateLimits).
+  await sql`
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      scope TEXT NOT NULL,
+      key TEXT NOT NULL,
+      count INT NOT NULL DEFAULT 0,
+      window_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (scope, key)
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits (window_start)`
   await ensurePasswordResetsTable(sql)
   await sql`
     CREATE TABLE IF NOT EXISTS news (
