@@ -6,9 +6,9 @@
   "description": "LMS-платформа Международной академии бизнес лидерства (МАБЛ)",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run lint && vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && tsc -p tsconfig.api.json --noEmit",
     "prebuild": "node scripts/normalize-scorm.mjs"
   },
   "dependencies": {
