@@ -15,30 +15,65 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
  * Вне продакшена, чтобы не мешать локальной разработке, ключ генерируется
  * случайным при старте процесса: сессии живут до перезапуска и наружу не ходят.
  */
-const SECRET = resolveSecret()
+/**
+ * Рекомендуемая длина секрета. Короче — предупреждаем в логах, но НЕ отказываем:
+ * заблокировать вход из-за длины ключа несоразмерно, а любой заданный секрет
+ * несравнимо лучше прежней константы из открытого репозитория.
+ */
+const RECOMMENDED_SECRET_LENGTH = 32
 
-function resolveSecret(): string {
+/** Разобранный секрет. Считается лениво — см. комментарий у `secret()`. */
+let cachedSecret: string | undefined
+
+/**
+ * Секрет подписи. Резолвится ЛЕНИВО и намеренно.
+ *
+ * Раньше он вычислялся на верхнем уровне модуля и при отсутствии AUTH_SECRET
+ * бросал исключение. Исключение на импорте роняет функцию целиком — до
+ * try/catch в обработчике, — поэтому наружу уходил голый HTTP 500 без тела, и
+ * весь API (включая вход и публичные страницы) отвечал ошибкой без объяснения.
+ * Ошибка конфигурации не должна выглядеть как поломка платформы.
+ *
+ * Теперь: нет секрета — не выпускаем и не принимаем токены (fail closed), но
+ * говорим об этом понятным текстом там, где это действительно нужно.
+ */
+function secret(): string | undefined {
+  if (cachedSecret) return cachedSecret
+
   const configured = process.env.AUTH_SECRET?.trim()
   if (configured) {
-    if (configured.length < 32) {
-      throw new Error(
-        'AUTH_SECRET слишком короткий: нужен не меньше 32 символов случайной строки ' +
-          '(например, вывод `openssl rand -base64 48`).',
+    if (configured.length < RECOMMENDED_SECRET_LENGTH) {
+      console.warn(
+        `[auth] AUTH_SECRET короче ${RECOMMENDED_SECRET_LENGTH} символов — замените на более ` +
+          'длинный (`openssl rand -base64 48`). Вход при этом работает.',
       )
     }
-    return configured
+    cachedSecret = configured
+    return cachedSecret
   }
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error(
-      'Не задана переменная окружения AUTH_SECRET — секрет подписи токенов сессии. ' +
-        'Задайте её в настройках проекта (например, `openssl rand -base64 48`) и передеплойте.',
-    )
-  }
+
+  if (process.env.NODE_ENV === 'production') return undefined
+
   console.warn(
     '[auth] AUTH_SECRET не задан: вне продакшена используется случайный ключ на время процесса. ' +
       'Сессии не переживут перезапуск сервера.',
   )
-  return crypto.randomBytes(48).toString('base64url')
+  cachedSecret = crypto.randomBytes(48).toString('base64url')
+  return cachedSecret
+}
+
+/**
+ * Текст проблемы с настройкой подписи — или null, если всё в порядке.
+ * Обработчик показывает его на маршрутах входа вместо безликой ошибки 500.
+ */
+export function authSecretProblem(): string | null {
+  if (secret()) return null
+  return (
+    'На сервере не задан AUTH_SECRET — секрет подписи токенов сессии, поэтому вход недоступен. ' +
+    'Администратору: добавьте переменную окружения AUTH_SECRET (значение — вывод ' +
+    '`openssl rand -base64 48`) в настройках проекта и СДЕЛАЙТЕ НОВЫЙ ДЕПЛОЙ: ' +
+    'уже собранная версия переменные окружения не перечитывает.'
+  )
 }
 
 /** Время жизни токена — 7 суток. */
@@ -64,23 +99,30 @@ export interface TokenPayload {
   kind: string
 }
 
-function hmac(input: string): string {
-  return crypto.createHmac('sha256', SECRET).update(input).digest('hex')
+function hmac(input: string, key: string): string {
+  return crypto.createHmac('sha256', key).update(input).digest('hex')
 }
 
-/** Выпустить токен для пользователя. */
+/** Выпустить токен для пользователя. Без секрета выдавать сессии нельзя. */
 export function signToken(payload: TokenPayload): string {
+  const key = secret()
+  if (!key) throw new Error(authSecretProblem() as string)
   const body = { id: payload.id, kind: payload.kind, exp: Date.now() + TTL_MS }
   const b64 = Buffer.from(JSON.stringify(body)).toString('base64url')
-  return `${b64}.${hmac(b64)}`
+  return `${b64}.${hmac(b64, key)}`
 }
 
-/** Проверить токен; вернуть полезную нагрузку или null. */
+/**
+ * Проверить токен; вернуть полезную нагрузку или null.
+ * Без секрета проверить подпись нечем — значит, никто не авторизован.
+ */
 export function verifyToken(token: string | undefined): TokenPayload | null {
   if (!token) return null
+  const key = secret()
+  if (!key) return null
   const [b64, sig] = token.split('.')
   if (!b64 || !sig) return null
-  const expected = hmac(b64)
+  const expected = hmac(b64, key)
   // Длины должны совпадать, иначе timingSafeEqual бросит исключение.
   if (sig.length !== expected.length) return null
   if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
