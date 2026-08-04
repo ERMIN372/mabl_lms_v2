@@ -209,7 +209,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'events' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<CalendarEvent>('events', parseBody(req) as CalendarEvent, 'event'),
+        await contentCreate<CalendarEvent>('events', parseBody(req) as unknown as CalendarEvent, 'event'),
       )
     }
     if (path === 'events/next' && method === 'GET') {
@@ -267,7 +267,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'materials' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<Material>('materials', parseBody(req) as Material, 'material'),
+        await contentCreate<Material>('materials', parseBody(req) as unknown as Material, 'material'),
       )
     }
     // Прикреплённый файл материала грузится напрямую в Blob — так же, как
@@ -288,7 +288,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'surveys' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<Survey>('surveys', parseBody(req) as Survey, 'survey'),
+        await contentCreate<Survey>('surveys', parseBody(req) as unknown as Survey, 'survey'),
       )
     }
     if (segments[0] === 'surveys' && segments.length === 2) {
@@ -305,7 +305,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (path === 'forum/sections' && method === 'POST') {
       const created = await contentCreate<ForumSection>(
         'forum_sections',
-        { ...(parseBody(req) as ForumSection), topicsCount: 0 },
+        { ...(parseBody(req) as unknown as ForumSection), topicsCount: 0 },
         'section',
       )
       return res.status(201).json(created)
@@ -314,7 +314,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.json(await contentList<ForumTopic>('forum_topics'))
     }
     if (path === 'forum/topics' && method === 'POST') {
-      const body = parseBody(req) as ForumTopic
+      const body = parseBody(req) as unknown as ForumTopic
       const created = await contentCreate<ForumTopic>(
         'forum_topics',
         { ...body, comments: body.comments ?? [] },
@@ -351,7 +351,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'notifications' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<AppNotification>('notifications', parseBody(req) as AppNotification, 'note', true),
+        await contentCreate<AppNotification>('notifications', parseBody(req) as unknown as AppNotification, 'note', true),
       )
     }
     if (segments[0] === 'notifications' && segments.length === 2) {
@@ -887,9 +887,11 @@ async function resetPassword(req: VercelRequest, res: VercelResponse) {
   }
   // Смена пароля открывает сессию — значит нужна и cookie, иначе после сброса
   // материалы SCORM не откроются до следующего входа.
-  const token = signToken({ id: user.id, kind: user.kind })
-  res.setHeader('Set-Cookie', sessionCookie(token))
-  return res.json({ ...user, token })
+  // Имя не `token`: так называется одноразовый токен из письма, объявленный
+  // выше в этой же функции.
+  const sessionToken = signToken({ id: user.id, kind: user.kind })
+  res.setHeader('Set-Cookie', sessionCookie(sessionToken))
+  return res.json({ ...user, token: sessionToken })
 }
 
 async function listCourses(): Promise<Course[]> {
