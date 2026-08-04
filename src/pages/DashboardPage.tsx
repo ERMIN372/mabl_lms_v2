@@ -45,6 +45,23 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-10">
+      {/* Почта не подтверждена: не мешаем учиться, но напоминаем — без
+          подтверждённого адреса не восстановить пароль. */}
+      {user && !user.emailVerified && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-ocean/40 bg-oceanc-10 px-5 py-4">
+          <p className="text-sm text-ink-80">
+            Адрес <span className="font-semibold text-neft">{user.email}</span> не подтверждён —
+            без этого не получится восстановить пароль.
+          </p>
+          <Link
+            to="/verify-email"
+            className="shrink-0 text-sm font-semibold text-ocean hover:underline"
+          >
+            Подтвердить →
+          </Link>
+        </div>
+      )}
+
       {/* Приветствие */}
       <div>
         <p className="eyebrow mb-2">Личный кабинет</p>

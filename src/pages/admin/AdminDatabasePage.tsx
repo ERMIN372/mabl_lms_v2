@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { AdminPageHeader, StatCard } from '@/components/admin/AdminUI'
 import { api } from '@/api'
-import type { DbStatus, DbUser, DemoRow } from '@/api/database'
+import type { DbStatus, DbUser, DemoRow, MailStatus } from '@/api/database'
 import { cn } from '@/lib/utils'
 
 type Notice = { tone: 'ok' | 'err'; text: string } | null
@@ -111,6 +111,12 @@ export default function AdminDatabasePage() {
         <NewUserForm onCreated={refresh} setNotice={setNotice} />
       </section>
 
+      {/* Почта */}
+      <section className="mt-10">
+        <h2 className="mb-4 font-serif text-xl text-neft">Отправка писем</h2>
+        <MailDiagnostics />
+      </section>
+
       {/* Обслуживание */}
       <section className="mt-10">
         <h2 className="mb-4 font-serif text-xl text-neft">Обслуживание</h2>
@@ -149,6 +155,64 @@ export default function AdminDatabasePage() {
         </Card>
       </section>
     </div>
+  )
+}
+
+/**
+ * Настройки почты: письмо с восстановлением пароля уходит только при заданных
+ * переменных окружения. Раньше сервер отвечал «инструкция отправлена», ничего не
+ * отправляя, — здесь видно, работает отправка или нет и чего именно не хватает.
+ */
+function MailDiagnostics() {
+  const [mail, setMail] = useState<MailStatus | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    api.database
+      .mailStatus()
+      .then(setMail)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Не удалось получить настройки почты'))
+  }, [])
+
+  return (
+    <Card>
+      <CardBody className="space-y-4 p-5">
+        {error ? (
+          <p className="text-sm text-red-700">{error}</p>
+        ) : !mail ? (
+          <p className="text-sm text-ink-60">Загрузка…</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-3">
+              <Badge tone={mail.configured ? 'ocean' : 'neutral'}>
+                {mail.configured ? 'Отправка настроена' : 'Отправка не настроена'}
+              </Badge>
+              <span className="text-sm text-ink-60">
+                Транспорт:{' '}
+                {mail.transport === 'smtp'
+                  ? `SMTP ${mail.host ?? ''}:${mail.port ?? ''}`
+                  : mail.transport === 'resend'
+                    ? 'Resend (HTTP API)'
+                    : 'не выбран'}
+              </span>
+              {mail.from && <span className="text-sm text-ink-60">Отправитель: {mail.from}</span>}
+            </div>
+            {mail.problems.length > 0 && (
+              <ul className="list-disc space-y-1 pl-5 text-sm text-red-700">
+                {mail.problems.map((p) => (
+                  <li key={p}>{p}</li>
+                ))}
+              </ul>
+            )}
+            <p className="text-sm text-ink-60">
+              Переменные окружения задаются в панели Vercel (Settings → Environment Variables):
+              SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, MAIL_FROM — либо RESEND_API_KEY и
+              MAIL_FROM. После изменения переменных нужен новый деплой.
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
   )
 }
 
