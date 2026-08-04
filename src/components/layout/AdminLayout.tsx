@@ -28,6 +28,7 @@ const adminNav = [
   { to: '/admin/scorm', label: 'SCORM-пакеты', icon: Clipboard, end: false },
   { to: '/admin/users', label: 'Участники', icon: User, end: false },
   { to: '/admin/orders', label: 'Заказы', icon: Document, end: false },
+  { to: '/admin/applications', label: 'Заявки', icon: Clipboard, end: false },
   { to: '/admin/events', label: 'События', icon: Calendar, end: false },
   { to: '/admin/news', label: 'Новости', icon: Newspaper, end: false },
   { to: '/admin/forum', label: 'Форум', icon: Chat, end: false },

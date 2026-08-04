@@ -31,6 +31,7 @@ interface AuthContextValue {
   isAuthenticated: boolean
   isAdmin: boolean
   login: (email: string, password: string) => Promise<User>
+  register: (input: { name: string; email: string; password: string }) => Promise<User>
   logout: () => void
   recover: (email: string) => Promise<string>
 }
@@ -52,14 +53,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     else localStorage.removeItem(STORAGE_KEY)
   }, [user])
 
+  // Сессия, начатая до появления cookie, живёт только в localStorage. Раздача
+  // материалов SCORM читает именно cookie, поэтому подтверждаем сессию серверу
+  // при загрузке приложения — иначе у давно вошедших курсы «не открываются».
+  useEffect(() => {
+    if (user) void api.auth.syncSession()
+  }, [user])
+
   const login = async (email: string, password: string) => {
     const account = await api.auth.login(email, password)
     setUser(account)
     return account
   }
 
+  const register = async (input: { name: string; email: string; password: string }) => {
+    const account = await api.auth.register(input)
+    setUser(account)
+    return account
+  }
+
   const logout = () => {
-    api.auth.logout()
+    void api.auth.logout()
     setUser(null)
   }
 
@@ -71,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: Boolean(user),
       isAdmin: user?.kind === 'admin',
       login,
+      register,
       logout,
       recover,
     }),

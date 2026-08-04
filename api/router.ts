@@ -2,10 +2,19 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import bcrypt from 'bcryptjs'
 import { getSql } from './_db.js'
 import { ensureSchema, initDatabase } from './_seed.js'
+import { findDemoRows, purgeDemoRows } from './_demo.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
-import { signToken, requireAdmin, verifyToken } from './_auth.js'
-import { handleUploadPresigned } from '@vercel/blob/client'
+import {
+  signToken,
+  requireAdmin,
+  verifyToken,
+  bearer,
+  browserSession,
+  sessionCookie,
+  clearSessionCookie,
+} from './_auth.js'
+import { handleUpload, handleUploadPresigned } from '@vercel/blob/client'
 import { list as blobList, del as blobDel, issueSignedToken, presignUrl } from '@vercel/blob'
 import type {
   AdminUser,
@@ -18,21 +27,10 @@ import type {
   NewsItem,
   Order,
   OrderStatus,
+  ProgramApplication,
   Survey,
   User,
 } from '../src/types'
-
-// Mock-модули служат источником статического контента (только import type внутри —
-// при сборке зависимостей от @/ не остаётся). Расширения .js обязательны для ESM.
-import { courses as seedCourses } from '../src/data/courses.js'
-import { events as seedEvents } from '../src/data/events.js'
-import { news } from '../src/data/news.js'
-import { materials as seedMaterials } from '../src/data/materials.js'
-import { surveys as seedSurveys } from '../src/data/surveys.js'
-import { forumSections as seedForumSections, forumTopics as seedForumTopics } from '../src/data/forum.js'
-import { notifications as seedNotifications } from '../src/data/notifications.js'
-import { orders } from '../src/data/orders.js'
-import { adminUsers } from '../src/data/users.js'
 
 /**
  * Единый роутер всех /api/* эндпоинтов.
@@ -41,9 +39,8 @@ import { adminUsers } from '../src/data/users.js'
  * (`/api/(.*) → /api/router?path=$1`) — детерминированно для всех HTTP-методов.
  * Файл api/setup.ts имеет приоритет (прямое попадание по файловой системе).
  *
- * Каталог курсов и аутентификация — из БД Neon; остальные ресурсы (события,
- * новости, материалы, форум, опросники, заказы, участники) пока отдаются из
- * mock-модулей, единых с фронтендом.
+ * Все ресурсы (курсы, аккаунты, события, новости, материалы, форум, опросники,
+ * заказы, участники) хранятся в БД Neon и наполняются из админ-панели.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS — нужен для POST/PUT/DELETE из браузера.
@@ -82,19 +79,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const isMutation = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
   const isPublicMutation =
     path === 'auth/login' ||
+    path === 'auth/register' ||
     path === 'auth/recover' ||
-    path === 'auth/migrate' ||
+    path === 'auth/session' ||
+    path === 'auth/logout' ||
+    // Оплату инициирует слушатель: права проверяются внутри обработчика по
+    // токену сессии (а не по правам администратора).
     path === 'payments/create' ||
     path === 'payments/webhook' ||
-    // Presigned-загрузку вызывает клиент SDK (@vercel/blob) без нашего заголовка
-    // авторизации — права администратора проверяются внутри по токену из clientPayload.
+    // Выдачу токена загрузки в Blob вызывает клиент SDK (@vercel/blob) без нашего
+    // заголовка авторизации — права администратора проверяются внутри обработчика
+    // по токену из clientPayload.
     path === 'scorm/blob-upload' ||
+    path === 'materials/blob-upload' ||
+    // Заявку на поступление оставляет любой посетитель страницы программы —
+    // авторизация здесь не требуется по определению.
+    path === 'applications' ||
     (segments[0] === 'news' && (segments[2] === 'comments' || segments[2] === 'reactions'))
-  // Диагностика SCORM отдаёт стеки ошибок и структуру пакетов — только админам.
-  const isScormDiag =
-    segments[0] === 'scorm' &&
-    ['blob-status', 'blob-check', 'blob-probe', 'blob-last-error'].includes(segments[1])
-  const needsAdmin = segments[0] === 'admin' || isScormDiag || (isMutation && !isPublicMutation)
+  const needsAdmin = segments[0] === 'admin' || (isMutation && !isPublicMutation)
   if (needsAdmin && !requireAdmin(req, res)) return
 
   try {
@@ -102,9 +104,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (path === 'auth/login' && method === 'POST') {
       return await login(req, res)
     }
-    if (path === 'auth/migrate' && method === 'POST') {
-      const sql = getSql()
-      await sql`UPDATE users SET name = 'Администратор' WHERE id = 'u-adm' AND name = 'Елена Северова'`
+    if (path === 'auth/register' && method === 'POST') {
+      return await register(req, res)
+    }
+    // Обновить cookie сессии по действующему токену. Нужно тем, кто вошёл до
+    // появления cookie: токен у них в браузере уже есть, а cookie ещё нет, и
+    // без неё файлы SCORM-пакета не открываются.
+    if (path === 'auth/session' && method === 'POST') {
+      const account = verifyToken(bearer(req))
+      if (!account) return res.status(401).json({ message: 'Сессия недействительна.' })
+      res.setHeader('Set-Cookie', sessionCookie(bearer(req) as string))
+      return res.json({ ok: true })
+    }
+    if (path === 'auth/logout' && method === 'POST') {
+      res.setHeader('Set-Cookie', clearSessionCookie())
       return res.json({ ok: true })
     }
     if (path === 'auth/recover' && method === 'POST') {
@@ -115,21 +128,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.json({ message: `Инструкция по восстановлению доступа отправлена на ${email}.` })
     }
 
+    // ---------- ДОСТУП ПОЛЬЗОВАТЕЛЯ ----------
+    // Программы, открытые текущему пользователю: только по оплаченным заказам.
+    if (path === 'me/courses' && method === 'GET') {
+      return res.json({ courseIds: await listAccessibleCourseIds(req) })
+    }
+
     // ---------- COURSES (БД) ----------
+    // Ссылки запуска уроков видны только тем, у кого есть доступ к программе:
+    // публичный каталог раздавал прямые адреса платного контента.
     if (path === 'courses' && method === 'GET') {
-      return res.json(await listCourses())
+      return res.json(await visibleCourses(await listCourses(), req))
     }
     if (path === 'courses' && method === 'POST') {
       return await createCourse(req, res)
-    }
-    if (path === 'courses/reset' && method === 'POST') {
-      return await resetCourses(res)
     }
     if (segments[0] === 'courses' && segments.length === 2) {
       const id = segments[1]
       if (method === 'GET') {
         const course = await getCourse(id)
-        return course ? res.json(course) : res.status(404).json({ message: 'Программа не найдена' })
+        if (!course) return res.status(404).json({ message: 'Программа не найдена' })
+        const [visible] = await visibleCourses([course], req)
+        return res.json(visible)
       }
       if (method === 'PUT') return await updateCourse(id, req, res)
       if (method === 'DELETE') return await deleteCourse(id, res)
@@ -137,22 +157,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ---------- EVENTS (БД) ----------
     if (path === 'events' && method === 'GET') {
-      return res.json(await contentList<CalendarEvent>('events', seedEvents))
+      return res.json(await contentList<CalendarEvent>('events'))
     }
     if (path === 'events' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<CalendarEvent>('events', parseBody(req) as unknown as CalendarEvent, 'event'),
+        await contentCreate<CalendarEvent>('events', parseBody(req) as CalendarEvent, 'event'),
       )
     }
     if (path === 'events/next' && method === 'GET') {
-      const list = await contentList<CalendarEvent>('events', seedEvents)
+      const list = await contentList<CalendarEvent>('events')
       const next = list
         .filter((e) => e.type === 'Вебинар')
         .sort((a, b) => +new Date(a.date) - +new Date(b.date))[0]
       return res.json(next ?? null)
-    }
-    if (path === 'events/reset' && method === 'POST') {
-      return res.json(await contentReset<CalendarEvent>('events', seedEvents))
     }
     if (segments[0] === 'events' && segments.length === 2) {
       const id = segments[1]
@@ -171,11 +188,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'news' && method === 'GET') return res.json(await listNews())
     if (path === 'news' && method === 'POST') return await createNews(req, res)
-    if (path === 'news/reset' && method === 'POST') {
-      const sql = getSql()
-      await sql`DELETE FROM news`
-      return res.json([])
-    }
     // Комментарии и реакции к новости.
     if (segments[0] === 'news' && segments.length >= 3) {
       const newsId = segments[1]
@@ -187,7 +199,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return await deleteComment(newsId, segments[3], req, res)
       }
       if (sub === 'reactions') {
-        const userId = typeof req.query.userId === 'string' ? req.query.userId : ''
+        // Чьи реакции подсвечивать, решает токен: по ?userId= можно было
+        // подсмотреть, что именно лайкнул конкретный пользователь.
+        const userId = verifyToken(bearer(req))?.id ?? ''
         if (method === 'GET') return res.json(await getReactions(newsId, userId))
         if (method === 'POST') return await toggleReaction(newsId, req, res)
       }
@@ -201,34 +215,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ---------- MATERIALS (БД) ----------
     if (path === 'materials' && method === 'GET') {
-      return res.json(await contentList<Material>('materials', seedMaterials))
+      return res.json(await contentList<Material>('materials'))
     }
     if (path === 'materials' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<Material>('materials', parseBody(req) as unknown as Material, 'material'),
+        await contentCreate<Material>('materials', parseBody(req) as Material, 'material'),
       )
     }
-    if (path === 'materials/reset' && method === 'POST') {
-      return res.json(await contentReset<Material>('materials', seedMaterials))
+    // Прикреплённый файл материала грузится напрямую в Blob — так же, как
+    // файлы SCORM-пакетов (в обход лимита тела запроса Vercel 4.5 МБ).
+    if (path === 'materials/blob-upload' && method === 'POST') {
+      return await blobUpload('materials/', req, res)
     }
     if (segments[0] === 'materials' && segments.length === 2) {
       const id = segments[1]
       if (method === 'GET') return found(res, await contentGet<Material>('materials', id), 'Материал не найден')
-      if (method === 'PUT') return res.json(await contentUpdate<Material>('materials', id, parseBody(req)))
-      if (method === 'DELETE') { await contentRemove('materials', id); return res.status(204).end() }
+      if (method === 'PUT') return await updateMaterial(id, req, res)
+      if (method === 'DELETE') return await deleteMaterial(id, res)
     }
 
     // ---------- SURVEYS (БД) ----------
     if (path === 'surveys' && method === 'GET') {
-      return res.json(await contentList<Survey>('surveys', seedSurveys))
+      return res.json(await contentList<Survey>('surveys'))
     }
     if (path === 'surveys' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<Survey>('surveys', parseBody(req) as unknown as Survey, 'survey'),
+        await contentCreate<Survey>('surveys', parseBody(req) as Survey, 'survey'),
       )
-    }
-    if (path === 'surveys/reset' && method === 'POST') {
-      return res.json(await contentReset<Survey>('surveys', seedSurveys))
     }
     if (segments[0] === 'surveys' && segments.length === 2) {
       const id = segments[1]
@@ -244,16 +257,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (path === 'forum/sections' && method === 'POST') {
       const created = await contentCreate<ForumSection>(
         'forum_sections',
-        { ...(parseBody(req) as unknown as ForumSection), topicsCount: 0 },
+        { ...(parseBody(req) as ForumSection), topicsCount: 0 },
         'section',
       )
       return res.status(201).json(created)
     }
     if (path === 'forum/topics' && method === 'GET') {
-      return res.json(await contentList<ForumTopic>('forum_topics', seedForumTopics))
+      return res.json(await contentList<ForumTopic>('forum_topics'))
     }
     if (path === 'forum/topics' && method === 'POST') {
-      const body = parseBody(req) as unknown as ForumTopic
+      const body = parseBody(req) as ForumTopic
       const created = await contentCreate<ForumTopic>(
         'forum_topics',
         { ...body, comments: body.comments ?? [] },
@@ -261,11 +274,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         true,
       )
       return res.status(201).json(created)
-    }
-    if (path === 'forum/reset' && method === 'POST') {
-      await contentReset<ForumSection>('forum_sections', seedForumSections)
-      await contentReset<ForumTopic>('forum_topics', seedForumTopics)
-      return res.json({ ok: true })
     }
     if (segments[0] === 'forum' && segments[1] === 'sections' && segments.length === 3) {
       const id = segments[2]
@@ -277,7 +285,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (method === 'DELETE') {
         await contentRemove('forum_sections', id)
         // Темы удалённого раздела убираем, чтобы не «висели» без раздела.
-        const topics = await contentList<ForumTopic>('forum_topics', seedForumTopics)
+        const topics = await contentList<ForumTopic>('forum_topics')
         for (const t of topics.filter((t) => t.sectionId === id)) await contentRemove('forum_topics', t.id)
         return res.status(204).end()
       }
@@ -291,15 +299,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ---------- NOTIFICATIONS (БД) ----------
     if (path === 'notifications' && method === 'GET') {
-      return res.json(await contentList<AppNotification>('notifications', seedNotifications))
+      return res.json(await contentList<AppNotification>('notifications'))
     }
     if (path === 'notifications' && method === 'POST') {
       return res.status(201).json(
-        await contentCreate<AppNotification>('notifications', parseBody(req) as unknown as AppNotification, 'note', true),
+        await contentCreate<AppNotification>('notifications', parseBody(req) as AppNotification, 'note', true),
       )
-    }
-    if (path === 'notifications/reset' && method === 'POST') {
-      return res.json(await contentReset<AppNotification>('notifications', seedNotifications))
     }
     if (segments[0] === 'notifications' && segments.length === 2) {
       const id = segments[1]
@@ -318,11 +323,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'admin/db/init' && method === 'POST') {
       const sql = getSql()
-      const counts = await initDatabase(sql)
-      return res.json({ ok: true, counts })
+      const { courses, users, ...admin } = await initDatabase(sql)
+      // adminPassword приходит только когда аккаунт создан этим вызовом и
+      // ADMIN_PASSWORD не задан: показать один раз и больше нигде не хранить.
+      return res.json({ ok: true, counts: { courses, users }, ...admin })
     }
-    if (path === 'admin/db/reset-courses' && method === 'POST') {
-      return await resetCourses(res)
+    // Остатки старых демо-сидов в БД: сначала показать, потом удалить.
+    if (path === 'admin/db/demo' && method === 'GET') {
+      const sql = getSql()
+      await ensureSchema(sql)
+      return res.json({ rows: await findDemoRows(sql) })
+    }
+    if (path === 'admin/db/demo/purge' && method === 'POST') {
+      const sql = getSql()
+      await ensureSchema(sql)
+      return res.json(await purgeDemoRows(sql))
     }
     if (path === 'admin/db/users' && method === 'POST') {
       return await createDbUser(req, res)
@@ -337,62 +352,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Раздача файлов пакета через наш домен (прокси в Vercel Blob). Same-origin
     // обязателен: контент SCORM ищет window.API по родительским фреймам.
     if (segments[0] === 'scorm-file' && method === 'GET') {
-      return await serveScormFile(segments[1], segments.slice(2).join('/'), res)
+      return await serveScormFile(segments[1], segments.slice(2).join('/'), req, res)
     }
-    if (path === 'scorm/blob-status' && method === 'GET') {
-      // Возвращаем только ИМЕНА blob-переменных (без значений) — для диагностики.
-      const blobEnvNames = Object.keys(process.env).filter((k) => k.includes('BLOB'))
-      // Серверный put() авторизуется по RW-токену или по OIDC (BLOB_STORE_ID +
-      // VERCEL_OIDC_TOKEN, который подставляет рантайм Vercel).
-      return res.json({
-        configured: Boolean(resolveBlobToken()) || Boolean(process.env.BLOB_STORE_ID),
-        tokens: blobEnvNames,
-      })
-    }
-    if (path === 'scorm/blob-check' && method === 'GET') {
-      // Диагностика: пробуем реально выпустить signed-token и возвращаем
-      // настоящий текст ошибки (клиентский SDK его прячет).
-      try {
-        const token = await issueSignedToken({
-          pathname: 'scorm/_diag/probe.txt',
-          operations: ['put'],
-          maximumSizeInBytes: 1024,
-        })
-        return res.json({ ok: true, hasToken: Boolean(token) })
-      } catch (err) {
-        return res.json({ ok: false, error: err instanceof Error ? err.message : String(err) })
-      }
-    }
-    if (path === 'scorm/blob-probe' && method === 'GET') {
-      // Диагностика раздачи: для каждого пакета пробуем достать launch-файл.
-      const pkgs = await contentList<ScormPackageMeta>('scorm', [])
-      const results = []
-      for (const p of pkgs) {
-        const pathname = `scorm/${p.id}/${p.launch}`
-        let status = 0
-        let error: string | undefined
-        try {
-          status = (await fetch(await signedScormUrl(pathname))).status
-        } catch (e) {
-          status = -1
-          error = e instanceof Error ? e.message : String(e)
-        }
-        results.push({ id: p.id, launch: p.launch, hasFilesMap: Boolean(p.files), status, error })
-      }
-      return res.json(results)
-    }
-    if (path === 'scorm/blob-last-error' && method === 'GET') {
-      const row = await contentGet<{ id: string; message?: string; at?: string }>(
-        'scorm_debug',
-        'last-error',
-      )
-      return res.json(row ?? { message: null })
-    }
+    // Список пакетов — только администратору: он содержит карту файлов с прямыми
+    // адресами в хранилище, то есть публично раздавал платный контент в обход
+    // сайта. Слушателю этот список не нужен — у него есть ссылка запуска урока.
     if (path === 'scorm' && method === 'GET') {
-      return res.json(await contentList<ScormPackageMeta>('scorm', []))
+      if (!requireAdmin(req, res)) return
+      return res.json(await contentList<ScormPackageMeta>('scorm'))
+    }
+    // Преflight перед загрузкой: сообщает клиенту конкретную причину отказа
+    // (истёкшая админ-сессия или неподключённое хранилище Blob), потому что SDK
+    // @vercel/blob прячет её за общей ошибкой «Failed to retrieve the client token».
+    // Ответ не зависит от раздела — им пользуются и SCORM-пакеты, и файлы
+    // материалов (путь `scorm/upload-preflight` оставлен для совместимости).
+    if (
+      (path === 'storage/upload-preflight' || path === 'scorm/upload-preflight') &&
+      method === 'GET'
+    ) {
+      return res.json(await uploadPreflight(req))
     }
     if (path === 'scorm/blob-upload' && method === 'POST') {
-      return await scormBlobUpload(req, res)
+      return await blobUpload('scorm/', req, res)
+    }
+    // Диагностика пакета: проверяет каждый файл так, как его отдаёт раздача,
+    // и возвращает по нему реальный HTTP-статус. Только для администратора.
+    if (segments[0] === 'scorm' && segments.length === 3 && segments[2] === 'diagnose' && method === 'GET') {
+      if (verifyToken(bearer(req))?.kind !== 'admin') {
+        return res.status(403).json({ message: 'Требуются права администратора.' })
+      }
+      return res.json(await diagnoseScormPackage(decodeURIComponent(segments[1])))
     }
     if (path === 'scorm' && method === 'POST') {
       return res.status(201).json(await saveScormPackage(parseBody(req)))
@@ -405,7 +394,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ---------- ADMIN · УЧАСТНИКИ (БД) ----------
     if (path === 'admin/users' && method === 'GET') return res.json(await listParticipants())
     if (path === 'admin/users' && method === 'POST') return await createParticipant(req, res)
-    if (path === 'admin/users/reset' && method === 'POST') return await resetParticipants(res)
     if (
       segments[0] === 'admin' &&
       segments[1] === 'users' &&
@@ -434,21 +422,43 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return await handlePaymentWebhook(req, res)
     }
     if (segments[0] === 'payments' && segments[1] === 'by-order' && segments.length === 3 && method === 'GET') {
-      return await getOrderPaymentStatus(segments[2], res)
+      return await getOrderPaymentStatus(segments[2], req, res)
     }
     if (segments[0] === 'payments' && segments.length === 2 && method === 'GET') {
-      return await getPaymentStatus(segments[1], res)
+      return await getPaymentStatus(segments[1], req, res)
     }
 
     // ---------- ADMIN · ЗАКАЗЫ (БД) ----------
     if (path === 'admin/orders' && method === 'GET') return res.json(await listOrders())
     if (path === 'admin/orders' && method === 'POST') return await createOrder(req, res)
-    if (path === 'admin/orders/reset' && method === 'POST') return await resetOrders(res)
     if (segments[0] === 'admin' && segments[1] === 'orders' && segments.length === 3) {
       const id = segments[2]
       if (method === 'GET') return found(res, await getOrder(id), 'Заказ не найден')
       if (method === 'PUT') return await updateOrder(id, req, res)
       if (method === 'DELETE') return await deleteOrder(id, res)
+    }
+
+    // ---------- ЗАЯВКИ НА ПОСТУПЛЕНИЕ ----------
+    // Приём заявки — публичный (со страницы программы), просмотр и обработка —
+    // только для приёмной комиссии в админ-панели.
+    if (path === 'applications' && method === 'POST') {
+      return await createApplication(req, res)
+    }
+    if (path === 'admin/applications' && method === 'GET') {
+      return res.json(await contentList<ProgramApplication>('applications'))
+    }
+    if (segments[0] === 'admin' && segments[1] === 'applications' && segments.length === 3) {
+      const id = segments[2]
+      if (method === 'GET') {
+        return found(res, await contentGet<ProgramApplication>('applications', id), 'Заявка не найдена')
+      }
+      if (method === 'PUT' || method === 'PATCH') {
+        return res.json(await contentUpdate<ProgramApplication>('applications', id, parseBody(req)))
+      }
+      if (method === 'DELETE') {
+        await contentRemove('applications', id)
+        return res.status(204).end()
+      }
     }
 
     return res.status(404).json({ message: `Маршрут не найден: ${method} /api/${path}` })
@@ -507,20 +517,76 @@ async function login(req: VercelRequest, res: VercelResponse) {
     kind: (row.kind as User['kind']) ?? 'student',
   }
   const token = signToken({ id: user.id, kind: user.kind })
+  res.setHeader('Set-Cookie', sessionCookie(token))
   return res.json({ ...user, token })
+}
+
+/**
+ * POST /api/auth/register
+ * Самостоятельная регистрация слушателя: аккаунт нужен, чтобы оплатить
+ * программу и получить к ней доступ. Сразу выдаёт токен сессии.
+ */
+async function register(req: VercelRequest, res: VercelResponse) {
+  const body = parseBody(req)
+  const name = String(body.name ?? '').trim()
+  const email = String(body.email ?? '').trim().toLowerCase()
+  const password = String(body.password ?? '')
+  if (!name) return res.status(400).json({ message: 'Укажите имя и фамилию.' })
+  if (!email.includes('@')) return res.status(400).json({ message: 'Укажите корректный e-mail.' })
+  if (password.length < 8) {
+    return res.status(400).json({ message: 'Пароль должен быть не короче 8 символов.' })
+  }
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const exists = await sql`SELECT id FROM users WHERE email = ${email} LIMIT 1`
+  if (exists[0]) {
+    return res.status(409).json({ message: 'Аккаунт с таким e-mail уже существует — войдите.' })
+  }
+
+  const id = `u-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  const role = 'Слушатель академии'
+  const hash = await bcrypt.hash(password, 10)
+  await sql`
+    INSERT INTO users (id, name, email, role, kind, password_hash)
+    VALUES (${id}, ${name}, ${email}, ${role}, 'student', ${hash})
+  `
+
+  // Дублируем в «Участники», чтобы новый слушатель был виден администратору.
+  const participant: AdminUser = {
+    id,
+    name,
+    email,
+    role: 'student',
+    status: 'active',
+    registeredAt: new Date().toISOString().slice(0, 10),
+    lastActiveAt: new Date().toISOString().slice(0, 10),
+    enrolledCourseIds: [],
+    avgProgress: 0,
+  }
+  const [{ max }] = await sql`SELECT COALESCE(MAX(sort_order), 0) + 1 AS max FROM participants`
+  await sql`
+    INSERT INTO participants (id, data, sort_order)
+    VALUES (${id}, ${JSON.stringify(participant)}::jsonb, ${Number(max)})
+    ON CONFLICT (id) DO NOTHING
+  `
+
+  const user: User = { id, name, email, role, kind: 'student' }
+  const token = signToken({ id, kind: 'student' })
+  res.setHeader('Set-Cookie', sessionCookie(token))
+  return res.status(201).json({ ...user, token })
 }
 
 async function listCourses(): Promise<Course[]> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM courses ORDER BY sort_order ASC`
-  if (rows.length === 0) return seedCourses
   return rows.map((r) => r.data as Course)
 }
 
 async function getCourse(id: string): Promise<Course | undefined> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM courses WHERE id = ${id} LIMIT 1`
-  return rows[0] ? (rows[0].data as Course) : seedCourses.find((c) => c.id === id)
+  return rows[0] ? (rows[0].data as Course) : undefined
 }
 
 async function createCourse(req: VercelRequest, res: VercelResponse) {
@@ -555,18 +621,6 @@ async function deleteCourse(id: string, res: VercelResponse) {
   return res.status(204).end()
 }
 
-async function resetCourses(res: VercelResponse) {
-  const sql = getSql()
-  await sql`DELETE FROM courses`
-  for (let i = 0; i < seedCourses.length; i += 1) {
-    await sql`
-      INSERT INTO courses (id, data, sort_order)
-      VALUES (${seedCourses[i].id}, ${JSON.stringify(seedCourses[i])}::jsonb, ${i})
-    `
-  }
-  return res.json(seedCourses)
-}
-
 // ---------------- news helpers ----------------
 
 async function listNews(): Promise<NewsItem[]> {
@@ -574,23 +628,17 @@ async function listNews(): Promise<NewsItem[]> {
     const sql = getSql()
     await ensureSchema(sql)
     const rows = await sql`SELECT data FROM news ORDER BY published_at DESC NULLS LAST`
-    if (rows.length === 0) return news
     return rows.map((r) => r.data as NewsItem)
   } catch {
-    // Нет БД (например, локальный mock-режим) — отдаём статический список.
-    return news
+    // БД недоступна — новостей нет.
+    return []
   }
 }
 
 async function getNewsItem(id: string): Promise<NewsItem | undefined> {
-  try {
-    const sql = getSql()
-    const rows = await sql`SELECT data FROM news WHERE id = ${id} LIMIT 1`
-    if (rows[0]) return rows[0].data as NewsItem
-  } catch {
-    /* fallthrough к статике */
-  }
-  return news.find((n) => n.id === id)
+  const sql = getSql()
+  const rows = await sql`SELECT data FROM news WHERE id = ${id} LIMIT 1`
+  return rows[0] ? (rows[0].data as NewsItem) : undefined
 }
 
 async function createNews(req: VercelRequest, res: VercelResponse) {
@@ -653,12 +701,21 @@ async function listComments(newsId: string) {
 }
 
 async function createComment(newsId: string, req: VercelRequest, res: VercelResponse) {
+  // Автора берём из токена, а не из тела запроса: иначе кто угодно оставляет
+  // комментарии от чужого имени и с чужим userId.
+  const account = verifyToken(bearer(req))
+  if (!account) {
+    return res.status(401).json({ message: 'Войдите в аккаунт, чтобы оставить комментарий.' })
+  }
+
   const sql = getSql()
   await ensureSchema(sql)
   const b = parseBody(req)
-  const author = (String(b.author ?? '').trim() || 'Участник').slice(0, 120)
   const body = String(b.body ?? '').trim()
-  const userId = b.userId ? String(b.userId) : null
+  const userId = account.id
+  const named = await sql`SELECT name FROM users WHERE id = ${userId} LIMIT 1`
+  if (!named[0]) return res.status(401).json({ message: 'Аккаунт не найден. Войдите заново.' })
+  const author = (String(named[0].name ?? '').trim() || 'Участник').slice(0, 120)
   if (!body) return res.status(400).json({ message: 'Комментарий не может быть пустым.' })
   if (body.length > 2000) return res.status(400).json({ message: 'Слишком длинный комментарий (макс. 2000 символов).' })
   const id = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -676,16 +733,20 @@ async function deleteComment(
   req: VercelRequest,
   res: VercelResponse,
 ) {
+  // Права считаем по токену сессии. Раньше здесь брался ?userId= из адреса, а
+  // роль искалась в базе по этому же значению — то есть «администратором»
+  // становился любой, кто подставил в ссылку идентификатор администратора
+  // (а он публично виден в списке комментариев).
+  const account = verifyToken(bearer(req))
+  if (!account) {
+    return res.status(401).json({ message: 'Войдите в аккаунт, чтобы удалить комментарий.' })
+  }
+
   const sql = getSql()
   const rows = await sql`SELECT user_id FROM news_comments WHERE id = ${commentId} AND news_id = ${newsId} LIMIT 1`
   if (!rows[0]) return res.status(404).json({ message: 'Комментарий не найден' })
-  const userId = typeof req.query.userId === 'string' ? req.query.userId : ''
-  const isOwner = Boolean(rows[0].user_id) && rows[0].user_id === userId
-  let isAdmin = false
-  if (userId) {
-    const u = await sql`SELECT kind FROM users WHERE id = ${userId} LIMIT 1`
-    isAdmin = u[0]?.kind === 'admin'
-  }
+  const isOwner = Boolean(rows[0].user_id) && rows[0].user_id === account.id
+  const isAdmin = account.kind === 'admin'
   if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Нет прав на удаление комментария.' })
   await sql`DELETE FROM news_comments WHERE id = ${commentId}`
   return res.status(204).end()
@@ -706,12 +767,16 @@ async function getReactions(newsId: string, userId: string) {
 }
 
 async function toggleReaction(newsId: string, req: VercelRequest, res: VercelResponse) {
+  // userId — только из токена: из тела запроса он позволял ставить и снимать
+  // реакции от имени любого пользователя.
+  const account = verifyToken(bearer(req))
+  if (!account) return res.status(401).json({ message: 'Войдите, чтобы поставить реакцию.' })
+
   const sql = getSql()
   await ensureSchema(sql)
   const b = parseBody(req)
-  const userId = b.userId ? String(b.userId) : ''
+  const userId = account.id
   const emoji = String(b.emoji ?? '').trim()
-  if (!userId) return res.status(401).json({ message: 'Войдите, чтобы поставить реакцию.' })
   if (!emoji || emoji.length > 16) return res.status(400).json({ message: 'Некорректная реакция.' })
   const existing = await sql`
     SELECT 1 FROM news_reactions WHERE news_id = ${newsId} AND user_id = ${userId} AND emoji = ${emoji} LIMIT 1
@@ -729,23 +794,9 @@ async function toggleReaction(newsId: string, req: VercelRequest, res: VercelRes
 
 // ---------------- admin participants (БД) ----------------
 
-async function ensureParticipantsSeeded(sql: ReturnType<typeof getSql>) {
-  const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM participants`
-  if (Number(count) > 0) return
-  for (let i = 0; i < adminUsers.length; i += 1) {
-    const p = adminUsers[i]
-    await sql`
-      INSERT INTO participants (id, data, sort_order)
-      VALUES (${p.id}, ${JSON.stringify(p)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-}
-
 async function listParticipants(): Promise<AdminUser[]> {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureParticipantsSeeded(sql)
   const rows = await sql`SELECT data FROM participants ORDER BY sort_order ASC`
   return rows.map((r) => r.data as AdminUser)
 }
@@ -753,7 +804,7 @@ async function listParticipants(): Promise<AdminUser[]> {
 async function getParticipant(id: string): Promise<AdminUser | undefined> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM participants WHERE id = ${id} LIMIT 1`
-  return rows[0] ? (rows[0].data as AdminUser) : adminUsers.find((u) => u.id === id)
+  return rows[0] ? (rows[0].data as AdminUser) : undefined
 }
 
 async function createParticipant(req: VercelRequest, res: VercelResponse) {
@@ -785,7 +836,6 @@ async function updateParticipant(id: string, req: VercelRequest, res: VercelResp
 async function setParticipantStatus(id: string, status: string, res: VercelResponse) {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureParticipantsSeeded(sql)
   const rows = await sql`SELECT data FROM participants WHERE id = ${id} LIMIT 1`
   if (!rows[0]) return res.status(404).json({ message: 'Участник не найден' })
   const next = { ...(rows[0].data as AdminUser), status } as AdminUser
@@ -796,43 +846,15 @@ async function setParticipantStatus(id: string, status: string, res: VercelRespo
 async function deleteParticipant(id: string, res: VercelResponse) {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureParticipantsSeeded(sql)
   await sql`DELETE FROM participants WHERE id = ${id}`
   return res.status(204).end()
 }
 
-async function resetParticipants(res: VercelResponse) {
-  const sql = getSql()
-  await ensureSchema(sql)
-  await sql`DELETE FROM participants`
-  for (let i = 0; i < adminUsers.length; i += 1) {
-    await sql`
-      INSERT INTO participants (id, data, sort_order)
-      VALUES (${adminUsers[i].id}, ${JSON.stringify(adminUsers[i])}::jsonb, ${i})
-    `
-  }
-  return res.json(adminUsers)
-}
-
 // ---------------- admin orders (БД) ----------------
-
-async function ensureOrdersSeeded(sql: ReturnType<typeof getSql>) {
-  const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM orders`
-  if (Number(count) > 0) return
-  for (let i = 0; i < orders.length; i += 1) {
-    const o = orders[i]
-    await sql`
-      INSERT INTO orders (id, data, sort_order)
-      VALUES (${o.id}, ${JSON.stringify(o)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-}
 
 async function listOrders(): Promise<Order[]> {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureOrdersSeeded(sql)
   const rows = await sql`SELECT data FROM orders ORDER BY sort_order ASC`
   return rows.map((r) => r.data as Order)
 }
@@ -840,7 +862,7 @@ async function listOrders(): Promise<Order[]> {
 async function getOrder(id: string): Promise<Order | undefined> {
   const sql = getSql()
   const rows = await sql`SELECT data FROM orders WHERE id = ${id} LIMIT 1`
-  return rows[0] ? (rows[0].data as Order) : orders.find((o) => o.id === id)
+  return rows[0] ? (rows[0].data as Order) : undefined
 }
 
 async function createOrder(req: VercelRequest, res: VercelResponse) {
@@ -881,37 +903,266 @@ async function updateOrder(id: string, req: VercelRequest, res: VercelResponse) 
 async function deleteOrder(id: string, res: VercelResponse) {
   const sql = getSql()
   await ensureSchema(sql)
-  await ensureOrdersSeeded(sql)
   await sql`DELETE FROM orders WHERE id = ${id}`
   return res.status(204).end()
 }
 
-async function resetOrders(res: VercelResponse) {
+// ---------------- заявки на поступление ----------------
+
+/**
+ * POST /api/applications — приём заявки со страницы программы.
+ *
+ * Публичный эндпоинт: имя, e-mail и телефон приходят из формы, статус и дату
+ * проставляет сервер (клиенту их доверять нельзя). Если запрос пришёл с
+ * действующим токеном сессии, заявку связываем с аккаунтом.
+ */
+async function createApplication(req: VercelRequest, res: VercelResponse) {
+  const body = parseBody(req)
+  const name = String(body.name ?? '').trim()
+  const email = String(body.email ?? '').trim().toLowerCase()
+  const phone = String(body.phone ?? '').trim()
+  const comment = String(body.comment ?? '').trim()
+  const programId = String(body.programId ?? '').trim()
+  const programTitle = String(body.programTitle ?? '').trim()
+
+  if (!name || !email || !phone) {
+    return res.status(400).json({ message: 'Укажите имя, e-mail и телефон.' })
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ message: 'Укажите корректный e-mail.' })
+  }
+  if (phone.replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ message: 'Укажите корректный номер телефона.' })
+  }
+  if (!programId) {
+    return res.status(400).json({ message: 'Не указана программа.' })
+  }
+
+  const session = verifyToken(bearer(req))
+  const application: ProgramApplication = {
+    id: `APP-${Date.now().toString(36).toUpperCase()}`,
+    programId,
+    programTitle: programTitle || programId,
+    name: name.slice(0, 200),
+    email: email.slice(0, 200),
+    phone: phone.slice(0, 50),
+    ...(comment ? { comment: comment.slice(0, 2000) } : {}),
+    status: 'new',
+    createdAt: new Date().toISOString(),
+    ...(session ? { userId: session.id } : {}),
+  }
+
+  // prepend=true — свежие заявки оказываются вверху списка в админ-панели.
+  const created = await contentCreate<ProgramApplication>(
+    'applications',
+    application,
+    'application',
+    true,
+  )
+  return res.status(201).json(created)
+}
+
+// ---------------- доступ к программам ----------------
+
+/**
+ * Программы, открытые пользователю: только оплаченные заказы (status = paid),
+ * привязанные к id из токена сессии. Без токена доступа нет — гость видит
+ * только описание программы.
+ */
+async function listAccessibleCourseIds(req: VercelRequest): Promise<string[]> {
+  const account = verifyToken(bearer(req))
+  if (!account) return []
+  return await accessibleCourseIdsFor(account.id)
+}
+
+/**
+ * Кэш оплаченных программ по пользователю. Раздача SCORM спрашивает доступ на
+ * каждый файл пакета (а их сотни), поэтому ходить в базу каждый раз нельзя.
+ * Короткий TTL: выдача доступа после оплаты подхватится в течение полуминуты.
+ */
+const ACCESS_TTL_MS = 30_000
+const accessCache = new Map<string, { expires: number; ids: string[] }>()
+
+async function accessibleCourseIdsFor(userId: string): Promise<string[]> {
+  const cached = accessCache.get(userId)
+  if (cached && cached.expires > Date.now()) return cached.ids
+
   const sql = getSql()
   await ensureSchema(sql)
-  await sql`DELETE FROM orders`
-  for (let i = 0; i < orders.length; i += 1) {
-    await sql`
-      INSERT INTO orders (id, data, sort_order)
-      VALUES (${orders[i].id}, ${JSON.stringify(orders[i])}::jsonb, ${i})
-    `
+  const rows = await sql`
+    SELECT data->>'courseId' AS course_id FROM orders
+    WHERE data->>'userId' = ${userId} AND data->>'status' = 'paid'
+  `
+  const ids = Array.from(new Set(rows.map((r) => r.course_id as string).filter(Boolean)))
+  accessCache.set(userId, { expires: Date.now() + ACCESS_TTL_MS, ids })
+  return ids
+}
+
+/** Бесплатная программа открыта любому вошедшему слушателю. */
+function isFreeCourse(course: Pick<Course, 'price'>): boolean {
+  return !course.price || course.price <= 0
+}
+
+/**
+ * Программы, использующие SCORM-пакет. Связь — через launchUrl уроков, который
+ * при загрузке пакета формируется как `/scorm-store/<id>/<точка входа>`.
+ */
+const PACKAGE_TTL_MS = 30_000
+let coursesByPackage: { expires: number; map: Map<string, Course[]> } | null = null
+
+async function coursesUsingScormPackage(packageId: string): Promise<Course[]> {
+  if (!coursesByPackage || coursesByPackage.expires <= Date.now()) {
+    const map = new Map<string, Course[]>()
+    for (const course of await listCourses()) {
+      for (const module of course.modules ?? []) {
+        for (const lesson of module.lessons ?? []) {
+          const id = scormPackageIdFromUrl(lesson.launchUrl)
+          if (!id) continue
+          const list = map.get(id) ?? []
+          if (!list.some((c) => c.id === course.id)) list.push(course)
+          map.set(id, list)
+        }
+      }
+    }
+    coursesByPackage = { expires: Date.now() + PACKAGE_TTL_MS, map }
   }
-  return res.json(orders)
+  return coursesByPackage.map.get(packageId) ?? []
+}
+
+/** id пакета из ссылки запуска урока (`/scorm-store/<id>/...`). */
+function scormPackageIdFromUrl(launchUrl: string | undefined): string | undefined {
+  if (!launchUrl) return undefined
+  const m = launchUrl.match(/\/scorm-store\/([^/]+)\//)
+  if (!m) return undefined
+  try {
+    return decodeURIComponent(m[1])
+  } catch {
+    return m[1]
+  }
+}
+
+type ScormAccess = { ok: true } | { ok: false; status: number; hint: string }
+
+/**
+ * Есть ли у запроса право на файлы пакета.
+ *
+ * Раньше раздача `/scorm-store/*` не спрашивала вообще ничего: зная id пакета
+ * (а его публично отдавал GET /api/scorm), любой посетитель скачивал платный
+ * курс целиком. Проверка доступа жила только на клиенте, то есть была
+ * оформлением, а не защитой.
+ */
+async function scormAccess(packageId: string, req: VercelRequest): Promise<ScormAccess> {
+  const account = browserSession(req)
+  if (!account) {
+    return {
+      ok: false,
+      status: 401,
+      hint: 'Войдите в личный кабинет академии и откройте программу заново.',
+    }
+  }
+  if (account.kind === 'admin') return { ok: true }
+
+  const courses = await coursesUsingScormPackage(packageId)
+  if (courses.length === 0) {
+    return {
+      ok: false,
+      status: 403,
+      hint: 'Пакет не привязан ни к одной программе. Администратору: подключите его к уроку в админ-панели.',
+    }
+  }
+  if (courses.some(isFreeCourse)) return { ok: true }
+
+  const owned = await accessibleCourseIdsFor(account.id)
+  if (courses.some((c) => owned.includes(c.id))) return { ok: true }
+
+  return {
+    ok: false,
+    status: 403,
+    hint: 'Доступ к материалам открывается после оплаты программы.',
+  }
+}
+
+/**
+ * Копия программы без ссылок запуска уроков — для тех, у кого нет доступа.
+ * Описание, структура и цена остаются публичными: закрыт только сам контент.
+ */
+function withoutLaunchUrls(course: Course): Course {
+  if (!course.modules?.some((m) => m.lessons?.some((l) => l.launchUrl))) return course
+  return {
+    ...course,
+    modules: course.modules.map((module) => ({
+      ...module,
+      lessons: (module.lessons ?? []).map(({ launchUrl: _launchUrl, ...lesson }) => lesson),
+    })),
+  }
+}
+
+/** Отдать программы, вырезав ссылки запуска у недоступных пользователю. */
+async function visibleCourses(courses: Course[], req: VercelRequest): Promise<Course[]> {
+  const account = verifyToken(bearer(req))
+  if (account?.kind === 'admin') return courses
+  const owned = account ? await accessibleCourseIdsFor(account.id) : []
+  return courses.map((course) =>
+    account && (isFreeCourse(course) || owned.includes(course.id))
+      ? course
+      : withoutLaunchUrls(course),
+  )
 }
 
 // ---------------- payments (ЮKassa) ----------------
 
-/** Базовый URL сайта для return_url (из заголовков запроса или env). */
+/**
+ * Базовый URL сайта (return_url оплаты, ссылки в письмах).
+ *
+ * Заголовки запроса здесь — крайний случай и только со сверкой по списку
+ * разрешённых доменов. Заголовок Host/X-Forwarded-Host подставляет тот, кто
+ * шлёт запрос: без проверки достаточно было отправить восстановление пароля с
+ * `X-Forwarded-Host: attacker.example`, чтобы жертве ушло настоящее письмо от
+ * академии со ссылкой на чужой домен, а переход по ней отдал бы токен сброса.
+ */
 function siteOrigin(req: VercelRequest): string {
-  if (process.env.YOOKASSA_RETURN_URL) return process.env.YOOKASSA_RETURN_URL.replace(/\/$/, '')
+  const configured = process.env.SITE_URL || process.env.YOOKASSA_RETURN_URL
+  if (configured) return configured.replace(/\/$/, '')
+
   const proto = (req.headers['x-forwarded-proto'] as string) || 'https'
-  const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost'
-  return `${proto}://${host}`
+  const rawHost = (req.headers['x-forwarded-host'] as string) || req.headers.host || ''
+  const host = String(rawHost).split(',')[0].trim().toLowerCase()
+
+  if (host && isTrustedHost(host)) return `${proto}://${host}`
+
+  // Домен из заголовка не подтверждён — берём собственный адрес деплоя.
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+  }
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`
+  return 'http://localhost:5173'
+}
+
+/**
+ * Домен из заголовка — свой? Разрешены домены собственного деплоя и всё, что
+ * перечислено в ALLOWED_HOSTS (через запятую), плюс localhost для разработки.
+ */
+function isTrustedHost(host: string): boolean {
+  const bare = host.replace(/:\d+$/, '')
+  if (process.env.NODE_ENV !== 'production' && (bare === 'localhost' || bare === '127.0.0.1')) {
+    return true
+  }
+  const allowed = new Set(
+    [
+      process.env.VERCEL_PROJECT_PRODUCTION_URL,
+      process.env.VERCEL_URL,
+      ...(process.env.ALLOWED_HOSTS ?? '').split(','),
+    ]
+      .map((v) => (v ?? '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
+      .filter(Boolean),
+  )
+  return allowed.has(bare) || allowed.has(host)
 }
 
 /**
  * POST /api/payments/create
- * Тело: { courseId, email, userId? }
+ * Тело: { courseId, email? }. Требует токен сессии — заказ привязывается к
+ * пользователю из токена (клиент чужой userId подставить не может).
  * Создаёт платёж в ЮKassa, заводит заказ со статусом pending и возвращает
  * ссылку на платёжную форму. Цена берётся из БД — клиент её не диктует.
  */
@@ -919,7 +1170,12 @@ async function createCoursePayment(req: VercelRequest, res: VercelResponse) {
   if (!isYooKassaConfigured()) {
     return res.status(503).json({ message: 'Онлайн-оплата временно недоступна.' })
   }
-  const { courseId, email, userId } = parseBody(req)
+  const session = verifyToken(bearer(req))
+  if (!session) {
+    return res.status(401).json({ message: 'Войдите в личный кабинет, чтобы оформить доступ.' })
+  }
+  const userId = session.id
+  const { courseId, email } = parseBody(req)
   const course = await getCourse(String(courseId ?? ''))
   if (!course) return res.status(404).json({ message: 'Программа не найдена' })
   if (!course.price || course.price <= 0) {
@@ -944,14 +1200,14 @@ async function createCoursePayment(req: VercelRequest, res: VercelResponse) {
     currency: 'RUB',
     description: `Доступ к программе «${course.title}» (${orderId})`,
     returnUrl: `${siteOrigin(req)}/checkout?course=${course.id}&order=${orderId}`,
-    metadata: { orderId, courseId: course.id, userId: String(userId ?? '') },
+    metadata: { orderId, courseId: course.id, userId },
     idempotenceKey: orderId,
     receiptEmail: email ? String(email) : undefined,
   })
 
   const order: Order = {
     id: orderId,
-    userId: String(userId ?? ''),
+    userId,
     courseId: course.id,
     amount: course.price,
     date: new Date().toISOString().slice(0, 10),
@@ -1021,7 +1277,10 @@ async function handlePaymentWebhook(req: VercelRequest, res: VercelResponse) {
  * Используется на странице возврата, чтобы показать актуальный статус, не
  * дожидаясь webhook.
  */
-async function getPaymentStatus(id: string, res: VercelResponse) {
+async function getPaymentStatus(id: string, req: VercelRequest, res: VercelResponse) {
+  if (verifyToken(bearer(req))?.kind !== 'admin') {
+    return res.status(403).json({ message: 'Требуются права администратора.' })
+  }
   if (!isYooKassaConfigured()) return res.status(503).json({ message: 'Онлайн-оплата недоступна.' })
   const payment = await getPayment(id)
   const order = await applyPaymentStatus(payment)
@@ -1032,12 +1291,18 @@ async function getPaymentStatus(id: string, res: VercelResponse) {
  * GET /api/payments/by-order/:orderId
  * Возврат после оплаты: по номеру заказа находим платёж, перезапрашиваем его
  * статус в ЮKassa и отдаём актуальное состояние (не дожидаясь webhook).
+ * Статус заказа виден только его владельцу и администратору.
  */
-async function getOrderPaymentStatus(orderId: string, res: VercelResponse) {
+async function getOrderPaymentStatus(orderId: string, req: VercelRequest, res: VercelResponse) {
+  const session = verifyToken(bearer(req))
+  if (!session) return res.status(401).json({ message: 'Войдите в личный кабинет.' })
   const sql = getSql()
   const rows = await sql`SELECT data FROM orders WHERE id = ${orderId} LIMIT 1`
   if (!rows[0]) return res.status(404).json({ message: 'Заказ не найден' })
   const order = rows[0].data as Order
+  if (session.kind !== 'admin' && order.userId !== session.id) {
+    return res.status(403).json({ message: 'Заказ оформлен на другой аккаунт.' })
+  }
   if (!order.paymentId || !isYooKassaConfigured()) {
     return res.json({ orderId, status: order.status, paid: order.status === 'paid' })
   }
@@ -1107,6 +1372,28 @@ async function createDbUser(req: VercelRequest, res: VercelResponse) {
     INSERT INTO users (id, name, email, role, kind, password_hash)
     VALUES (${id}, ${name}, ${email}, ${finalRole}, ${kind}, ${hash})
   `
+  // Слушателя дублируем в «Участники» — иначе его не выбрать при выдаче
+  // доступа заказом.
+  if (kind === 'student') {
+    const today = new Date().toISOString().slice(0, 10)
+    const participant: AdminUser = {
+      id,
+      name,
+      email,
+      role: 'student',
+      status: 'active',
+      registeredAt: today,
+      lastActiveAt: today,
+      enrolledCourseIds: [],
+      avgProgress: 0,
+    }
+    const [{ max }] = await sql`SELECT COALESCE(MAX(sort_order), 0) + 1 AS max FROM participants`
+    await sql`
+      INSERT INTO participants (id, data, sort_order)
+      VALUES (${id}, ${JSON.stringify(participant)}::jsonb, ${Number(max)})
+      ON CONFLICT (id) DO NOTHING
+    `
+  }
   return res.status(201).json({ id, name, email, role: finalRole, kind })
 }
 
@@ -1165,17 +1452,6 @@ function uniqueId(desired: string, taken: Set<string>): string {
 
 // ---------------- SCORM-пакеты (метаданные в БД + файлы в Vercel Blob) --------
 
-/**
- * Токен чтения-записи Blob. Vercel обычно кладёт его в BLOB_READ_WRITE_TOKEN,
- * но при нестандартном префиксе хранилища имя может быть вида
- * <PREFIX>_BLOB_READ_WRITE_TOKEN — берём любой подходящий.
- */
-function resolveBlobToken(): string | undefined {
-  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
-  const key = Object.keys(process.env).find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN'))
-  return key ? process.env[key] : undefined
-}
-
 interface ScormPackageMeta {
   id: string
   title: string
@@ -1185,8 +1461,12 @@ interface ScormPackageMeta {
   uploadedAt: string
   /** Origin хранилища Blob, например https://xxxx.public.blob.vercel-storage.com */
   blobBase?: string
-  /** Карта путь-в-пакете → фактический URL файла в Blob. */
-  files?: Record<string, string>
+  /**
+   * Карта «путь внутри пакета → {u: URL, s: размер}». Проставляется при загрузке,
+   * чтобы раздача брала адреса отсюда и не вызывала list() (advanced-операция
+   * Vercel Blob со строгим лимитом на бесплатном плане).
+   */
+  files?: Record<string, { u: string; s: number }>
 }
 
 const SCORM_MIME: Record<string, string> = {
@@ -1220,9 +1500,9 @@ function scormMime(path: string): string {
   return SCORM_MIME[ext] ?? 'application/octet-stream'
 }
 
-// Кэш метаданных по id пакета — чтобы не ходить в БД на каждый файл
+// Кэш origin хранилища по id пакета — чтобы не ходить в БД на каждый файл
 // (тёплый инстанс функции переиспользует значение между запросами).
-const scormMetaCache = new Map<string, ScormPackageMeta>()
+const scormBaseCache = new Map<string, string>()
 
 /** Сохранить метаданные пакета (id задаёт клиент — совпадает с путём в Blob). */
 async function saveScormPackage(body: Record<string, unknown>): Promise<ScormPackageMeta> {
@@ -1238,7 +1518,8 @@ async function saveScormPackage(body: Record<string, unknown>): Promise<ScormPac
     ON CONFLICT (collection, id)
       DO UPDATE SET data = ${JSON.stringify(meta)}::jsonb, updated_at = NOW()
   `
-  scormMetaCache.set(id, meta)
+  if (meta.blobBase) scormBaseCache.set(id, meta.blobBase)
+  scormFilesCache.delete(id)
   return meta
 }
 
@@ -1247,164 +1528,453 @@ async function deleteScormPackage(id: string): Promise<void> {
   const sql = getSql()
   await ensureSchema(sql)
   await sql`DELETE FROM content WHERE collection = 'scorm' AND id = ${id}`
-  scormMetaCache.delete(id)
+  scormBaseCache.delete(id)
+  scormFilesCache.delete(id)
   try {
-    const token = resolveBlobToken()
-    const { blobs } = await blobList({ prefix: `scorm/${id}/`, token })
-    if (blobs.length) await blobDel(blobs.map((b) => b.url), { token })
+    const { blobs } = await blobList({ prefix: `scorm/${id}/` })
+    if (blobs.length) await blobDel(blobs.map((b) => b.url))
   } catch (err) {
     console.error('[scorm] blob delete error:', err)
   }
 }
 
-// Широкий signed-token на чтение (без ограничения по пути) — кэшируется, чтобы
-// не выпускать его на каждый файл. presignUrl из него строит подписанные ссылки
-// локально (без сети).
-let scormReadToken: Awaited<ReturnType<typeof issueSignedToken>> | null = null
-let scormReadTokenExp = 0
-
-async function broadScormReadToken() {
-  const now = Date.now()
-  if (scormReadToken && now < scormReadTokenExp) return scormReadToken
-  scormReadToken = await issueSignedToken({ operations: ['get'], validUntil: now + 15 * 60 * 1000 })
-  scormReadTokenExp = now + 10 * 60 * 1000
-  return scormReadToken
+/**
+ * Страница ошибки раздачи SCORM. Показывается внутри iframe плеера, поэтому
+ * вместо голой строки отдаём аккуратную вёрстку: слушателю — общее сообщение,
+ * администратору — подсказку, как починить (перезагрузить пакет через админку).
+ */
+function scormErrorPage(res: VercelResponse, hint: string, status = 404) {
+  res.setHeader('Content-Type', 'text/html;charset=utf-8')
+  // Страница собирается из наших же строк, но заголовок всё равно фиксируем:
+  // без него браузер вправе угадать тип по содержимому.
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  return res.status(status).send(
+    `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Материалы недоступны</title></head>
+<body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f4f0;font-family:Georgia,serif;color:#1d232a">
+<div style="max-width:32rem;padding:2rem;text-align:center">
+<p style="font-size:1.4rem;margin:0 0 .75rem">Материалы курса временно недоступны</p>
+<p style="font-size:.95rem;color:#5a616a;margin:0">${hint}</p>
+</div></body></html>`,
+  )
 }
 
-/** Подписанная ссылка на приватный файл пакета. Пробуем широкий токен, при
- * неудаче — точечный на этот путь. */
-async function signedScormUrl(pathname: string): Promise<string> {
-  try {
-    const token = await broadScormReadToken()
-    const { presignedUrl } = await presignUrl(token, { pathname, operation: 'get', access: 'private' })
-    return presignedUrl
-  } catch {
-    scormReadToken = null
-    const token = await issueSignedToken({
-      pathname,
-      operations: ['get'],
-      validUntil: Date.now() + 5 * 60 * 1000,
-    })
-    const { presignedUrl } = await presignUrl(token, { pathname, operation: 'get', access: 'private' })
-    return presignedUrl
+// Кэш «путь → канонический URL и размер» файлов пакета из list(). URL из API
+// хранилища надёжнее, чем сборка адреса строкой: кириллические id, различия
+// кодировок и приватные blob'ы ломают «угаданные» адреса. Кэш обновляется при
+// промахе и сбрасывается при перезаписи/удалении пакета.
+interface ScormFileRef {
+  url: string
+  size: number
+}
+const scormFilesCache = new Map<string, Map<string, ScormFileRef>>()
+
+/**
+ * Карта файлов пакета. Сначала — из метаданных в БД (без единой Blob-операции),
+ * и только для старых пакетов без карты — разовый list() как резерв. list —
+ * «advanced operation» Vercel Blob со строгим месячным лимитом, поэтому в
+ * горячем пути раздачи его быть не должно.
+ */
+async function getScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
+  const cached = scormFilesCache.get(id)
+  if (cached) return cached
+
+  const meta = await contentGet<ScormPackageMeta>('scorm', id)
+  if (meta?.files && Object.keys(meta.files).length) {
+    const map = new Map<string, ScormFileRef>()
+    for (const [rel, ref] of Object.entries(meta.files)) {
+      map.set(`scorm/${id}/${rel}`, { url: ref.u, size: ref.s })
+    }
+    scormFilesCache.set(id, map)
+    return map
   }
+
+  // Старый пакет без карты: разово перечисляем файлы и сохраняем карту в
+  // метаданные — чтобы дальше list() не вызывался (самоизлечение без перезаливки).
+  const map = await loadScormFileMap(id)
+  if (meta && map.size) {
+    try {
+      const files: Record<string, { u: string; s: number }> = {}
+      for (const [pathname, ref] of map) {
+        files[pathname.replace(`scorm/${id}/`, '')] = { u: ref.url, s: ref.size }
+      }
+      await saveScormPackage({ ...meta, files } as unknown as Record<string, unknown>)
+    } catch (err) {
+      console.error(`[scorm] не удалось сохранить карту файлов пакета «${id}»:`, err)
+    }
+  }
+  return map
 }
 
-/** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
-async function serveScormFile(id: string, rel: string, res: VercelResponse) {
-  if (!id || !rel) return res.status(404).send('SCORM-ресурс не найден')
-  let meta = scormMetaCache.get(id)
-  if (!meta) {
-    const loaded = await contentGet<ScormPackageMeta>('scorm', id)
-    if (loaded) {
-      meta = loaded
-      scormMetaCache.set(id, loaded)
-    }
-  }
-  if (!meta) return res.status(404).send('SCORM-пакет не найден')
-  // Если известна карта файлов и такого нет — сразу 404.
-  if (meta.files && !(rel in meta.files)) return res.status(404).send('SCORM-ресурс не найден')
-
-  const pathname = `scorm/${id}/${rel}`
-  try {
-    const upstream = await fetch(await signedScormUrl(pathname))
-    if (!upstream.ok) {
-      await saveScormDebug(`serve ${pathname}: upstream ${upstream.status}`)
-      return res.status(404).send('SCORM-ресурс не найден')
-    }
-    const buf = Buffer.from(await upstream.arrayBuffer())
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
-    res.setHeader('Cache-Control', 'public, max-age=3600')
-    return res.status(200).send(buf)
-  } catch (err) {
-    await saveScormDebug(`serve ${pathname}: ${err instanceof Error ? err.message : String(err)}`)
-    return res.status(404).send('SCORM-ресурс не найден')
-  }
+/** Резервный источник карты — список файлов из хранилища (расходует advanced-операции). */
+async function loadScormFileMap(id: string): Promise<Map<string, ScormFileRef>> {
+  const map = new Map<string, ScormFileRef>()
+  let cursor: string | undefined
+  do {
+    const page = await blobList({ prefix: `scorm/${id}/`, cursor })
+    for (const b of page.blobs) map.set(b.pathname, { url: b.url, size: b.size })
+    cursor = page.hasMore ? page.cursor : undefined
+  } while (cursor)
+  scormFilesCache.set(id, map)
+  return map
 }
 
 /**
- * Выдать клиенту presigned-URL для прямой загрузки файла в Blob (без лимита
- * тела запроса — крупные файлы грузятся частями через multipart). Авторизация
- * по OIDC (issueSignedToken через VERCEL_OIDC_TOKEN); права администратора — по
- * токену сессии из clientPayload. Файлы приватные; читает их serveScormFile по
- * подписанному URL.
+ * Порог проксирования: у serverless-функций Vercel лимит тела ответа 4,5 МБ,
+ * поэтому крупные файлы (видео, тяжёлые изображения) отдаём 302-редиректом
+ * прямо на хранилище, а не через буфер функции.
  */
-async function scormBlobUpload(req: VercelRequest, res: VercelResponse) {
-  const webhookPublicKey = process.env.BLOB_WEBHOOK_PUBLIC_KEY
-  if (!webhookPublicKey && !process.env.BLOB_STORE_ID && !resolveBlobToken()) {
-    return res.status(503).json({
-      message:
-        'Хранилище Vercel Blob не подключено. Подключите Blob в проекте Vercel и выполните Redeploy.',
+const SCORM_PROXY_LIMIT = 3.5 * 1024 * 1024
+
+/** Подписанный GET-адрес файла (для приватных blob). */
+async function presignScormGet(pathname: string): Promise<string> {
+  const token = await issueSignedToken({
+    // Область '*' — из-за бага SDK с декодированием кириллических путей
+    // (см. комментарий в getSignedToken).
+    pathname: '*',
+    operations: ['get'],
+    validUntil: Date.now() + 60 * 60_000,
+    token: blobReadWriteToken(),
+  })
+  const { presignedUrl } = await presignUrl(token, { operation: 'get', pathname, access: 'private' })
+  return presignedUrl
+}
+
+/**
+ * Диагностика пакета: для каждого файла воспроизводит путь раздачи и фиксирует
+ * реальный результат — чтобы понять, что именно не открывается у слушателя,
+ * без DevTools и гаданий.
+ */
+async function diagnoseScormPackage(id: string) {
+  const started = Date.now()
+  const report = {
+    id,
+    mode: blobReadWriteToken() ? 'token' : process.env.BLOB_STORE_ID ? 'oidc' : 'none',
+    fileCount: 0,
+    okCount: 0,
+    failed: [] as Array<{ path: string; sizeKb: number; via: string; status: number | string }>,
+    listError: undefined as string | undefined,
+    tookMs: 0,
+  }
+
+  let files: Map<string, ScormFileRef>
+  try {
+    files = await getScormFileMap(id)
+  } catch (err) {
+    report.listError = err instanceof Error ? err.message : String(err)
+    report.tookMs = Date.now() - started
+    return report
+  }
+  report.fileCount = files.size
+
+  const check = async (pathname: string, ref: ScormFileRef) => {
+    const via = ref.size > SCORM_PROXY_LIMIT ? 'redirect' : 'proxy'
+    // Проверяем доступ так же, как это делает браузер: GET с Range на 1 байт
+    // (для крупных файлов не тянем весь объём; HEAD публичные blob отклоняют).
+    const range = { headers: { Range: 'bytes=0-0' } }
+    let status: number | string = 'no-url'
+    try {
+      const pub = await fetch(ref.url, range)
+      status = pub.status
+      if (pub.ok) return { ok: true, via: `${via}/public`, status }
+    } catch (err) {
+      status = err instanceof Error ? err.message : 'fetch-error'
+    }
+    // Резерв: подписанная ссылка (на случай приватного blob).
+    try {
+      const signed = await fetch(await presignScormGet(pathname), range)
+      status = signed.status
+      if (signed.ok) return { ok: true, via: `${via}/signed`, status }
+    } catch (err) {
+      status = err instanceof Error ? err.message : 'sign-error'
+    }
+    return { ok: false, via, status }
+  }
+
+  // Ограничиваем параллелизм, чтобы не упереться в лимиты.
+  const entries = [...files.entries()]
+  for (let i = 0; i < entries.length; i += 8) {
+    const batch = entries.slice(i, i + 8)
+    const results = await Promise.all(batch.map(([p, ref]) => check(p, ref)))
+    results.forEach((r, j) => {
+      const [pathname, ref] = batch[j]
+      if (r.ok) {
+        report.okCount += 1
+      } else {
+        report.failed.push({
+          path: pathname.replace(`scorm/${id}/`, ''),
+          sizeKb: Math.round(ref.size / 1024),
+          via: r.via,
+          status: r.status,
+        })
+      }
     })
   }
+  report.tookMs = Date.now() - started
+  return report
+}
+
+/** Отдать файл пакета, проксируя его из Vercel Blob (same-origin для SCORM API). */
+async function serveScormFile(
+  id: string,
+  rel: string,
+  req: VercelRequest,
+  res: VercelResponse,
+) {
+  if (!id || !rel) return scormErrorPage(res, 'Неверная ссылка на материалы. Обратитесь к администратору академии.')
+
+  // Выход за пределы папки пакета: `..` переживает encodeURIComponent, а fetch
+  // схлопывает его при разборе адреса — без этой проверки по ссылке вида
+  // `/scorm-store/<пакет>/../../materials/...` читались чужие объекты хранилища.
+  const parts = rel.split('/')
+  if (parts.some((p) => p === '..' || p === '.' || p === '')) {
+    return scormErrorPage(res, 'Неверная ссылка на материалы. Обратитесь к администратору академии.')
+  }
+
+  const access = await scormAccess(id, req)
+  if (!access.ok) {
+    console.warn(`[scorm] отказано в доступе к пакету «${id}» (HTTP ${access.status})`)
+    return scormErrorPage(res, access.hint, access.status)
+  }
+
+  const pathname = `scorm/${id}/${rel}`
+
+  // 1) Канонический URL файла из карты пакета (метаданные БД, без Blob-операций).
+  let file: ScormFileRef | undefined
   try {
-    const jsonResponse = await handleUploadPresigned({
-      body: parseBody(req) as unknown as Parameters<typeof handleUploadPresigned>[0]['body'],
+    const files = await getScormFileMap(id)
+    file = files.get(pathname)
+  } catch (err) {
+    console.error(`[scorm] не удалось получить карту файлов пакета «${id}»:`, err)
+  }
+  let url = file?.url
+
+  // Крупные файлы не пролезают в лимит ответа функции (4,5 МБ) — отдаём
+  // редиректом прямо на публичный URL из хранилища. HEAD-проверку не делаем:
+  // публичные blob Vercel отвечают на HEAD отказом, и это ошибочно уводило
+  // на приватную подписанную ссылку, которая для публичного файла даёт 403.
+  if (file && file.size > SCORM_PROXY_LIMIT) {
+    res.setHeader('Cache-Control', 'public, max-age=600')
+    return res.redirect(302, file.url)
+  }
+
+  // 2) Резерв для старых пакетов: адрес по blobBase из метаданных в БД.
+  if (!url) {
+    let base = scormBaseCache.get(id)
+    if (!base) {
+      const meta = await contentGet<ScormPackageMeta>('scorm', id)
+      base = meta?.blobBase
+      if (base) scormBaseCache.set(id, base)
+    }
+    if (!base) {
+      console.error(`[scorm] пакет «${id}» не найден ни в Blob, ни в БД`)
+      return scormErrorPage(
+        res,
+        'Пакет не найден в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели.',
+      )
+    }
+    url = `${base}/${pathname.split('/').map(encodeURIComponent).join('/')}`
+  }
+
+  let upstream = await fetch(url)
+  if (!upstream.ok) {
+    // Blob может быть приватным (у новых store приватный доступ по умолчанию) —
+    // тогда подписываем GET сами.
+    try {
+      upstream = await fetch(await presignScormGet(pathname))
+    } catch (err) {
+      console.error(`[scorm] не удалось подписать GET для «${pathname}»:`, err)
+    }
+  }
+
+  if (!upstream.ok) {
+    console.error(`[scorm] файл «${rel}» пакета «${id}» недоступен (HTTP ${upstream.status})`)
+    return scormErrorPage(
+      res,
+      'Файлы пакета отсутствуют в серверном хранилище. Администратору: загрузите пакет заново в разделе «SCORM-пакеты» админ-панели — курсы, использующие пакет, восстановятся автоматически.',
+    )
+  }
+
+  const buf = Buffer.from(await upstream.arrayBuffer())
+  res.setHeader('Content-Type', upstream.headers.get('content-type') || scormMime(rel))
+  res.setHeader('Cache-Control', 'public, max-age=3600')
+  return res.status(200).send(buf)
+}
+
+/**
+ * RW-токен Vercel Blob. Обычно интеграция кладёт его в BLOB_READ_WRITE_TOKEN,
+ * но при кастомном имени/префиксе переменная может называться иначе
+ * (…_BLOB_READ_WRITE_TOKEN) — поэтому ищем и такой вариант.
+ */
+function blobReadWriteToken(): string | undefined {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN
+  const keys = Object.keys(process.env)
+  // Кастомный префикс интеграции даёт имена вида <PREFIX>_READ_WRITE_TOKEN —
+  // токен может вообще не содержать слова BLOB.
+  const key =
+    keys.find((k) => k.endsWith('BLOB_READ_WRITE_TOKEN')) ??
+    keys.find((k) => k.endsWith('_READ_WRITE_TOKEN'))
+  return key ? process.env[key] : undefined
+}
+
+/**
+ * Авторизовать прямую загрузку клиента в Blob. Права администратора проверяем
+ * по токену сессии из clientPayload; путь ограничиваем переданным префиксом
+ * (`scorm/` — файлы пакетов, `materials/` — файлы учебных материалов).
+ *
+ * Поддерживаются оба флоу SDK @vercel/blob:
+ * - классический (blob.generate-client-token) — когда в окружении есть
+ *   RW-токен BLOB_READ_WRITE_TOKEN;
+ * - пресайнд (blob.generate-presigned-url) — когда store подключён к проекту
+ *   по OIDC (в окружении только BLOB_STORE_ID, функции авторизуются сами,
+ *   а мы подписываем короткоживущий токен через issueSignedToken).
+ */
+async function blobUpload(prefix: string, req: VercelRequest, res: VercelResponse) {
+  const assertAllowed = (pathname: string, clientPayload?: string | null) => {
+    let ok = false
+    try {
+      const parsed = clientPayload ? JSON.parse(clientPayload) : {}
+      const payload = verifyToken(parsed.token)
+      ok = payload?.kind === 'admin'
+    } catch {
+      ok = false
+    }
+    if (!ok) throw new Error('Требуются права администратора.')
+    if (!pathname.startsWith(prefix)) throw new Error('Недопустимый путь загрузки.')
+  }
+
+  try {
+    const body = parseBody(req) as { type?: string }
+
+    if (body?.type === 'blob.generate-presigned-url') {
+      const jsonResponse = await handleUploadPresigned({
+        body: body as unknown as Parameters<typeof handleUploadPresigned>[0]['body'],
+        request: req as unknown as Request,
+        getSignedToken: async (pathname, clientPayload) => {
+          assertAllowed(pathname, clientPayload)
+          const token = await issueSignedToken({
+            // Область токена — '*', а не конкретный путь: SDK декодирует
+            // delegation-токен через atob (latin-1), и у путей с кириллицей
+            // (id пакетов из русских названий) проверка области ломается на
+            // мусорных байтах. Право на конкретный путь уже проверено выше
+            // в assertAllowed, а сам токен короткоживущий.
+            pathname: '*',
+            operations: ['put'],
+            validUntil: Date.now() + 15 * 60_000,
+            token: blobReadWriteToken(),
+          })
+          return { token, urlOptions: { addRandomSuffix: false, allowOverwrite: true } }
+        },
+      })
+      return res.json(jsonResponse)
+    }
+
+    const jsonResponse = await handleUpload({
+      token: blobReadWriteToken(),
+      body: body as unknown as Parameters<typeof handleUpload>[0]['body'],
       request: req as unknown as Request,
-      webhookPublicKey: webhookPublicKey ?? '',
-      getSignedToken: async (pathname, clientPayload) => {
-        let ok = false
-        try {
-          const parsed = clientPayload ? JSON.parse(clientPayload) : {}
-          ok = verifyToken(parsed.token)?.kind === 'admin'
-        } catch {
-          ok = false
+      onBeforeGenerateToken: async (pathname, clientPayload) => {
+        assertAllowed(pathname, clientPayload)
+        return {
+          addRandomSuffix: false,
+          allowOverwrite: true,
         }
-        if (!ok) throw new Error('Требуются права администратора.')
-        if (!pathname.startsWith('scorm/')) throw new Error('Недопустимый путь загрузки.')
-        const token = await issueSignedToken({
-          pathname,
-          operations: ['put'],
-          maximumSizeInBytes: 1024 * 1024 * 1024,
-        })
-        return { token, urlOptions: { addRandomSuffix: false } }
       },
     })
     return res.json(jsonResponse)
   } catch (err) {
-    const full = err instanceof Error ? err.stack || err.message : String(err)
-    await saveScormDebug(full)
+    // Клиентский SDK не показывает тело ответа — реальная причина видна
+    // только в серверных логах, поэтому пишем её туда обязательно.
+    console.error(`[${prefix}] blob-upload error:`, err)
     const message = err instanceof Error ? err.message : 'Ошибка загрузки в Blob'
     return res.status(400).json({ message })
   }
 }
 
-/** Сохранить последнюю ошибку загрузки для диагностики. */
-async function saveScormDebug(message: string): Promise<void> {
+/**
+ * Состояние хранилища перед загрузкой: есть ли права администратора, подключён
+ * ли Blob и каким способом авторизуется запись (RW-токен или OIDC-пресайнд).
+ * Общий ответ для всех разделов, которые грузят файлы напрямую в Blob.
+ */
+async function uploadPreflight(req: VercelRequest) {
+  const admin = verifyToken(bearer(req))?.kind === 'admin'
+  // Два способа записи в Blob: классический RW-токен либо OIDC-подключение
+  // store к проекту (Vercel выдаёт BLOB_STORE_ID вместо токена, и функции
+  // авторизуются самостоятельно). Клиент выбирает флоу загрузки по mode.
+  const hasToken = Boolean(blobReadWriteToken())
+  const hasOidcStore = Boolean(process.env.BLOB_STORE_ID)
+  // Пробная выдача подписанного токена: SDK на клиенте прячет причину отказа
+  // за общей фразой «Failed to retrieve the presigned URL», поэтому реальную
+  // ошибку (например, выключенный OIDC у проекта) ловим здесь и показываем
+  // администратору до начала загрузки.
+  let presignError: string | undefined
+  if (admin && !hasToken && hasOidcStore) {
+    try {
+      await issueSignedToken({
+        pathname: '_preflight',
+        operations: ['put'],
+        validUntil: Date.now() + 60_000,
+      })
+    } catch (err) {
+      presignError = err instanceof Error ? err.message : String(err)
+      console.error('[storage] preflight issueSignedToken error:', err)
+    }
+  }
+  return {
+    admin,
+    blob: hasToken || hasOidcStore,
+    mode: hasToken ? 'token' : hasOidcStore ? 'presigned' : undefined,
+    presignError,
+    // Имена (без значений) blob-переменных окружения — чтобы отличить
+    // «хранилище не подключено» от «токен под нестандартным именем».
+    blobEnv: admin
+      ? Object.keys(process.env).filter(
+          (k) => k.includes('BLOB') || k.endsWith('_READ_WRITE_TOKEN'),
+        )
+      : undefined,
+  }
+}
+
+// ---------------- материалы ----------------
+
+/**
+ * Обновление материала с уборкой в хранилище: если файл заменили или отвязали,
+ * старый объект в Blob удаляем — иначе он останется висеть навсегда.
+ */
+async function updateMaterial(id: string, req: VercelRequest, res: VercelResponse) {
+  const previous = await contentGet<Material>('materials', id)
+  const next = await contentUpdate<Material>('materials', id, parseBody(req))
+  if (previous?.fileUrl && previous.fileUrl !== next.fileUrl) {
+    await removeBlobFile(previous.fileUrl)
+  }
+  return res.json(next)
+}
+
+/** Удаление материала вместе с прикреплённым файлом. */
+async function deleteMaterial(id: string, res: VercelResponse) {
+  const material = await contentGet<Material>('materials', id)
+  await contentRemove('materials', id)
+  if (material?.fileUrl) await removeBlobFile(material.fileUrl)
+  return res.status(204).end()
+}
+
+/** Удалить объект в Blob, не роняя основную операцию из-за ошибки хранилища. */
+async function removeBlobFile(url: string): Promise<void> {
   try {
-    const sql = getSql()
-    await ensureSchema(sql)
-    const data = JSON.stringify({ message, at: new Date().toISOString() })
-    await sql`
-      INSERT INTO content (collection, id, data, sort_order)
-      VALUES ('scorm_debug', 'last-error', ${data}::jsonb, 0)
-      ON CONFLICT (collection, id) DO UPDATE SET data = ${data}::jsonb, updated_at = NOW()
-    `
+    await blobDel(url, { token: blobReadWriteToken() })
   } catch (err) {
-    console.error('[scorm] saveScormDebug error:', err)
+    console.error('[storage] blob delete error:', err)
   }
 }
 
 // ---------------- универсальное хранилище контента ----------------
 // События, материалы, опросники, разделы/темы форума и уведомления хранятся в
-// общей таблице content, ключ — (collection, id). Сиды переносятся в БД при
-// первом обращении к пустой коллекции.
+// общей таблице content, ключ — (collection, id). Наполняются из админ-панели.
 
 type WithId = { id: string; title?: string }
 
-async function contentList<T extends WithId>(collection: string, seed: T[]): Promise<T[]> {
+async function contentList<T extends WithId>(collection: string): Promise<T[]> {
   const sql = getSql()
   await ensureSchema(sql)
-  const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM content WHERE collection = ${collection}`
-  if (Number(count) === 0 && seed.length > 0) {
-    for (let i = 0; i < seed.length; i += 1) {
-      await sql`
-        INSERT INTO content (collection, id, data, sort_order)
-        VALUES (${collection}, ${seed[i].id}, ${JSON.stringify(seed[i])}::jsonb, ${i})
-        ON CONFLICT (collection, id) DO NOTHING
-      `
-    }
-  }
   const rows = await sql`SELECT data FROM content WHERE collection = ${collection} ORDER BY sort_order ASC`
   return rows.map((r) => r.data as T)
 }
@@ -1463,23 +2033,10 @@ async function contentRemove(collection: string, id: string): Promise<void> {
   await sql`DELETE FROM content WHERE collection = ${collection} AND id = ${id}`
 }
 
-async function contentReset<T extends WithId>(collection: string, seed: T[]): Promise<T[]> {
-  const sql = getSql()
-  await ensureSchema(sql)
-  await sql`DELETE FROM content WHERE collection = ${collection}`
-  for (let i = 0; i < seed.length; i += 1) {
-    await sql`
-      INSERT INTO content (collection, id, data, sort_order)
-      VALUES (${collection}, ${seed[i].id}, ${JSON.stringify(seed[i])}::jsonb, ${i})
-    `
-  }
-  return seed
-}
-
 /** Разделы форума со счётчиком тем, посчитанным по фактическим темам. */
 async function forumSectionsWithCounts(): Promise<ForumSection[]> {
-  const sections = await contentList<ForumSection>('forum_sections', seedForumSections)
-  const topics = await contentList<ForumTopic>('forum_topics', seedForumTopics)
+  const sections = await contentList<ForumSection>('forum_sections')
+  const topics = await contentList<ForumTopic>('forum_topics')
   return sections.map((s) => ({
     ...s,
     topicsCount: topics.filter((t) => t.sectionId === s.id).length,

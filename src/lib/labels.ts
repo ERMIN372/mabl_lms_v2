@@ -1,7 +1,13 @@
-import type { AdminUserStatus, CourseFormat, NotificationKind, OrderStatus } from '@/types'
+import type {
+  AdminUserStatus,
+  ApplicationStatus,
+  CourseFormat,
+  NotificationKind,
+  OrderStatus,
+} from '@/types'
 
 export const courseFormatLabel: Record<CourseFormat, string> = {
-  scorm: 'SCORM',
+  scorm: 'Тренинг',
   video: 'Видео',
   longread: 'Лонгрид',
 }
@@ -18,6 +24,13 @@ export const orderStatusLabel: Record<OrderStatus, string> = {
   paid: 'Оплачен',
   pending: 'Ожидает',
   refunded: 'Возврат',
+}
+
+export const applicationStatusLabel: Record<ApplicationStatus, string> = {
+  new: 'Новая',
+  processing: 'В работе',
+  enrolled: 'Зачислен',
+  declined: 'Отклонена',
 }
 
 export const adminUserStatusLabel: Record<AdminUserStatus, string> = {

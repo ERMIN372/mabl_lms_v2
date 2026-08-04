@@ -6,7 +6,7 @@
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/router?path=$1" },
     { "source": "/scorm-store/(.*)", "destination": "/api/router?path=scorm-file/$1" },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    { "source": "/((?!api/|scorm/).*)", "destination": "/index.html" }
   ],
   "crons": [
     { "path": "/api/news/sync", "schedule": "0 6 * * *" }

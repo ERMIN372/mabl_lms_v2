@@ -69,7 +69,7 @@ export default function SurveyDetailPage() {
       firstError?.scrollIntoView({ behavior: 'smooth', block: 'center' })
       return
     }
-    // Mock-отправка
+    // Ответы опросов пока не сохраняются на сервере — показываем подтверждение.
     setSubmitted(true)
   }
 

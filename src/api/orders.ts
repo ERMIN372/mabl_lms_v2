@@ -23,8 +23,4 @@ export const ordersApi = {
     return http<void>(`/admin/orders/${id}`, { method: 'DELETE' })
   },
 
-  /** Сброс к исходным данным (сидам). */
-  async reset(): Promise<Order[]> {
-    return http<Order[]>('/admin/orders/reset', { method: 'POST' })
-  },
 }

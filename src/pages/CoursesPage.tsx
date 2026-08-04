@@ -17,7 +17,7 @@ const filters: { key: FilterKey; label: string }[] = [
 ]
 
 export default function CoursesPage() {
-  const { isOwned } = usePurchases()
+  const { canAccessCourse } = usePurchases()
   const { courses } = useCourses()
   const [active, setActive] = useState<FilterKey>('all')
 
@@ -25,9 +25,9 @@ export default function CoursesPage() {
     return courses.filter((c) => {
       switch (active) {
         case 'owned':
-          return isOwned(c.id)
+          return canAccessCourse(c)
         case 'available':
-          return !isOwned(c.id)
+          return !canAccessCourse(c)
         case 'scorm':
         case 'video':
         case 'longread':
@@ -36,7 +36,7 @@ export default function CoursesPage() {
           return true
       }
     })
-  }, [active, isOwned, courses])
+  }, [active, canAccessCourse, courses])
 
   return (
     <div className="py-14 md:py-20">
@@ -44,7 +44,7 @@ export default function CoursesPage() {
         <SectionHeading
           eyebrow="Каталог"
           title="Программы академии"
-          description="Флагманские курсы МАБЛ по лидерству, финансам, переговорам и цифровой трансформации. Выберите формат и начните обучение."
+          description="Образовательные программы МАБЛ. Выберите формат, изучите описание и оформите доступ."
         />
 
         {/* Фильтры */}
@@ -71,7 +71,7 @@ export default function CoursesPage() {
               <CourseCard
                 key={course.id}
                 course={course}
-                owned={isOwned(course.id) || course.price === 0}
+                owned={canAccessCourse(course)}
               />
             ))}
           </div>

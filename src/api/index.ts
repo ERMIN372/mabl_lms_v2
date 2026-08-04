@@ -2,6 +2,7 @@ import { authApi } from './auth'
 import { coursesApi } from './courses'
 import { usersApi } from './users'
 import { ordersApi } from './orders'
+import { applicationsApi } from './applications'
 import { eventsApi } from './events'
 import { newsApi } from './news'
 import { materialsApi } from './materials'
@@ -15,15 +16,15 @@ import { paymentsApi } from './payments'
 /**
  * Единая точка доступа к данным приложения.
  *
- * Все компоненты и контексты работают только через `api.*`, не зная, откуда
- * приходят данные (mock или реальный бэкенд). Это позволяет «выходить из демо»
- * постепенно, ресурс за ресурсом.
+ * Все компоненты и контексты работают только через `api.*` — данные приходят
+ * с бэкенда (`/api/*`, serverless-функции Vercel + PostgreSQL Neon).
  */
 export const api = {
   auth: authApi,
   courses: coursesApi,
   users: usersApi,
   orders: ordersApi,
+  applications: applicationsApi,
   events: eventsApi,
   news: newsApi,
   materials: materialsApi,
@@ -36,4 +37,5 @@ export const api = {
 }
 
 export { API_URL, ApiError } from './config'
-export type { ScormPackage, ScormProbe, ScormBlobStatus, ScormLastError } from './scorm'
+export type { ScormPackage, ScormDiagnostics } from './scorm'
+export type { ApplicationDraft } from './applications'

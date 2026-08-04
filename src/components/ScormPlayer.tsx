@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowUpRight } from './ui/Icon'
+import { cn, displayTitle } from '@/lib/utils'
 
 /**
  * Плеер SCORM-пакетов (SCORM 1.2). Контент запускается в iframe, а на родительском
  * окне поднимается минимальный SCORM-runtime (`window.API`), который пакет находит
- * через `lms.js`. Прогресс/статус сохраняются в localStorage (демо-режим) и
+ * через `lms.js`. Прогресс/статус сохраняются в localStorage браузера и
  * пробрасываются наверх через onStatus — чтобы обновлять прогресс курса.
  *
- * В продакшене этот runtime заменяется на серверный трекинг (отправка cmi.* в API).
+ * Серверный трекинг прохождения (отправка cmi.* в API) ещё не подключён.
  */
 
 type CmiData = Record<string, string>
@@ -50,11 +51,12 @@ function computeStatus(data: CmiData): ScormStatus {
 
 function createApi(
   storageKey: string,
+  studentId: string,
   studentName: string,
   emit: (s: ScormStatus) => void,
 ): Scorm12Api {
   const defaults: CmiData = {
-    'cmi.core.student_id': 'u-001',
+    'cmi.core.student_id': studentId,
     'cmi.core.student_name': studentName,
     'cmi.core.lesson_status': 'not attempted',
     'cmi.core.lesson_mode': 'normal',
@@ -105,9 +107,14 @@ interface ScormPlayerProps {
   /** URL точки входа SCORM (res/index.html). */
   src: string
   title: string
+  /** Идентификатор слушателя для cmi.core.student_id. */
+  studentId?: string
   /** Имя слушателя для cmi.core.student_name. */
   studentName?: string
-  /** Ключ для сохранения прогресса. */
+  /**
+   * Ключ для сохранения прогресса. Должен включать идентификатор слушателя:
+   * на общем компьютере иначе следующий вошедший увидит чужой прогресс.
+   */
   storageKey: string
   /** Колбэк при изменении статуса/прогресса SCORM. */
   onStatus?: (status: ScormStatus) => void
@@ -116,39 +123,68 @@ interface ScormPlayerProps {
 export function ScormPlayer({
   src,
   title,
-  studentName = 'Слушатель МАБЛ',
+  studentId = 'guest',
+  studentName = 'Слушатель',
   storageKey,
   onStatus,
 }: ScormPlayerProps) {
   const [ready, setReady] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
 
   useEffect(() => {
-    const api = createApi(storageKey, studentName, (s) => onStatusRef.current?.(s))
+    const api = createApi(storageKey, studentId, studentName, (s) => onStatusRef.current?.(s))
     window.API = api
     setReady(true)
     return () => {
       if (window.API === api) delete window.API
     }
-  }, [storageKey, studentName])
+  }, [storageKey, studentId, studentName])
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement === wrapRef.current)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) void document.exitFullscreen()
+    else void wrapRef.current?.requestFullscreen()
+  }
 
   return (
-    <div className="overflow-hidden rounded-card border border-ink-10 bg-neft">
+    <div
+      ref={wrapRef}
+      className={cn(
+        'overflow-hidden border border-ink-10 bg-neft',
+        isFullscreen ? 'flex h-full w-full flex-col' : 'rounded-card',
+      )}
+    >
       <div className="flex items-center justify-between gap-3 border-b border-wisdom/10 px-4 py-2.5">
         <span className="truncate text-[0.72rem] uppercase tracking-wide text-wisdom/60">
-          SCORM · {title}
+          {displayTitle(title)}
         </span>
-        <a
-          href={src}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex shrink-0 items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
-        >
-          Открыть в новой вкладке <ArrowUpRight width={14} height={14} />
-        </a>
+        <div className="flex shrink-0 items-center gap-4">
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            className="inline-flex items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
+          >
+            {isFullscreen ? 'Свернуть' : 'На весь экран'}
+          </button>
+          <a
+            href={src}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-[0.72rem] uppercase tracking-wide text-wisdom/70 hover:text-wisdom"
+          >
+            Открыть в новой вкладке <ArrowUpRight width={14} height={14} />
+          </a>
+        </div>
       </div>
-      <div className="relative aspect-video w-full bg-[#444c54]">
+      <div className={cn('relative w-full bg-[#444c54]', isFullscreen ? 'flex-1' : 'aspect-video')}>
         {ready && (
           <iframe
             src={src}

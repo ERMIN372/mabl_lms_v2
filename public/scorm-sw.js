@@ -1,31 +1,36 @@
 /*
- * Service Worker для SCORM-пакетов, загруженных через админку.
+ * Саморазрушающийся service worker.
  *
- * Файлы пакетов теперь хранятся на сервере (Vercel Blob) и отдаются приложением
- * по /scorm-store/<id>/<путь> (прокси в api/router.ts). Воркер оставлен ради
- * совместимости со старыми пакетами, ранее сложенными в Cache Storage: при
- * попадании в кэш отдаём из него, иначе — уходим в сеть (на серверную раздачу).
+ * Раньше здесь жил воркер, который проигрывал SCORM-пакеты из Cache Storage.
+ * Теперь пакеты хранятся на сервере, а перехват /scorm-store/ этим воркером
+ * ломал раздачу крупных файлов (он не умеет отдавать странице ответы-редиректы,
+ * которыми отдаются файлы больше 4,5 МБ). Поэтому воркер снимает сам себя,
+ * чистит свой кэш и перестаёт вмешиваться в запросы. Файл оставлен (а не удалён),
+ * чтобы браузеры с уже установленным старым воркером получили это обновление и
+ * разрегистрировались.
  */
 
-const CACHE = 'scorm-packages'
-
-self.addEventListener('install', () => {
-  self.skipWaiting()
-})
+self.addEventListener('install', () => self.skipWaiting())
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim())
+  event.waitUntil(
+    (async () => {
+      try {
+        await caches.delete('scorm-packages')
+      } catch {
+        /* нет доступа к кэшу — не критично */
+      }
+      try {
+        await self.registration.unregister()
+        // Перезагружаем открытые вкладки, чтобы запросы пошли напрямую в сеть,
+        // минуя только что снятый воркер.
+        const clients = await self.clients.matchAll({ type: 'window' })
+        for (const client of clients) client.navigate(client.url)
+      } catch {
+        /* среда без прав на unregister/navigate — не критично */
+      }
+    })(),
+  )
 })
 
-self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url)
-  if (url.origin === self.location.origin && url.pathname.startsWith('/scorm-store/')) {
-    event.respondWith(
-      caches.open(CACHE).then((cache) =>
-        cache.match(event.request, { ignoreSearch: true }).then(
-          (hit) => hit || fetch(event.request),
-        ),
-      ),
-    )
-  }
-})
+// Никаких fetch-обработчиков: запросы идут в сеть напрямую.

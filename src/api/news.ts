@@ -26,10 +26,6 @@ export const newsApi = {
     return http<void>(`/news/${id}`, { method: 'DELETE' })
   },
 
-  /** Сброс к исходным данным (сидам). */
-  async reset(): Promise<NewsItem[]> {
-    return http<NewsItem[]>('/news/reset', { method: 'POST' })
-  },
 
   /** Импорт новостей из Telegram-канала. */
   async sync(): Promise<{ ok: boolean; channel: string; synced: number }> {
@@ -41,31 +37,28 @@ export const newsApi = {
     return http<NewsComment[]>(`/news/${newsId}/comments`)
   },
 
-  async addComment(
-    newsId: string,
-    input: { author: string; body: string; userId?: string },
-  ): Promise<NewsComment> {
+  // Автора и его идентификатор сервер берёт из токена сессии — передавать их с
+  // клиента незачем и небезопасно (так подделывались чужие комментарии).
+  async addComment(newsId: string, input: { body: string }): Promise<NewsComment> {
     return http<NewsComment>(`/news/${newsId}/comments`, {
       method: 'POST',
       body: JSON.stringify(input),
     })
   },
 
-  async removeComment(newsId: string, commentId: string, userId?: string): Promise<void> {
-    const q = userId ? `?userId=${encodeURIComponent(userId)}` : ''
-    await http<void>(`/news/${newsId}/comments/${commentId}${q}`, { method: 'DELETE' })
+  async removeComment(newsId: string, commentId: string): Promise<void> {
+    await http<void>(`/news/${newsId}/comments/${commentId}`, { method: 'DELETE' })
   },
 
   // ---------- Реакции ----------
-  async getReactions(newsId: string, userId?: string): Promise<NewsReactions> {
-    const q = userId ? `?userId=${encodeURIComponent(userId)}` : ''
-    return http<NewsReactions>(`/news/${newsId}/reactions${q}`)
+  async getReactions(newsId: string): Promise<NewsReactions> {
+    return http<NewsReactions>(`/news/${newsId}/reactions`)
   },
 
-  async toggleReaction(newsId: string, emoji: string, userId: string): Promise<NewsReactions> {
+  async toggleReaction(newsId: string, emoji: string): Promise<NewsReactions> {
     return http<NewsReactions>(`/news/${newsId}/reactions`, {
       method: 'POST',
-      body: JSON.stringify({ emoji, userId }),
+      body: JSON.stringify({ emoji }),
     })
   },
 }

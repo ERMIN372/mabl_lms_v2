@@ -1,35 +1,38 @@
 import bcrypt from 'bcryptjs'
 import type { NeonQueryFunction } from '@neondatabase/serverless'
-import { courses as seedCourses } from '../src/data/courses.js'
-import { adminUsers as seedParticipants } from '../src/data/users.js'
-import { orders as seedOrders } from '../src/data/orders.js'
 
 /**
- * Совместно используемая логика инициализации БД (схема + сиды).
+ * Совместно используемая логика инициализации БД (схема + стартовый админ).
  * Вызывается из api/setup.ts (по секрету) и из админ-панели (POST /api/admin/db/init).
  */
 
 type Sql = NeonQueryFunction<false, false>
 
-/** Демо-аккаунты по умолчанию (логин + пароль на экране входа). */
-export const defaultUsers = [
-  {
-    id: 'u-001',
-    name: 'Александр Орлов',
-    email: 'demo@mabl.ru',
-    role: 'Слушатель академии',
-    kind: 'student',
-    password: 'mabl2026',
-  },
-  {
-    id: 'u-adm',
-    name: 'Администратор',
-    email: 'admin@mabl.ru',
-    role: 'Администратор платформы',
-    kind: 'admin',
-    password: 'admin2026',
-  },
-]
+/**
+ * Стартовый аккаунт администратора. Создаётся только если такого e-mail в базе
+ * ещё нет; логин и пароль задаются переменными окружения ADMIN_EMAIL и
+ * ADMIN_PASSWORD. Контент платформы (программы, события, материалы, участники,
+ * заказы) создаётся из админ-панели — никакими данными база не наполняется.
+ *
+ * Пароля по умолчанию нет намеренно: константа в открытом коде означала бы, что
+ * доступ к админке знает каждый, кто видел репозиторий. Если ADMIN_PASSWORD не
+ * задан, инициализация генерирует случайный пароль и возвращает его в ответе —
+ * один раз, посмотреть и сохранить.
+ */
+export const defaultAdmin = {
+  id: 'u-adm',
+  name: 'Администратор',
+  email: (process.env.ADMIN_EMAIL || 'admin@mabl.ru').trim().toLowerCase(),
+  role: 'Администратор платформы',
+  kind: 'admin',
+}
+
+/** Случайный пароль на случай, когда ADMIN_PASSWORD не задан. */
+function generatePassword(): string {
+  const alphabet = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('')
+}
 
 /** Создаёт таблицы, если их ещё нет. */
 export async function ensureSchema(sql: Sql): Promise<void> {
@@ -113,46 +116,44 @@ export async function ensureSchema(sql: Sql): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_content_collection ON content (collection, sort_order)`
 }
 
-/** Полная инициализация: схема + сиды курсов и аккаунтов (без перезаписи существующих). */
-export async function initDatabase(sql: Sql): Promise<{ courses: number; users: number }> {
+/** Инициализация: схема + стартовый администратор (без перезаписи существующих данных). */
+export interface InitResult {
+  courses: number
+  users: number
+  /** Создан ли аккаунт администратора этим вызовом. */
+  adminCreated: boolean
+  /** E-mail администратора (существующего или созданного). */
+  adminEmail: string
+  /**
+   * Сгенерированный пароль — только если аккаунт создан прямо сейчас и
+   * ADMIN_PASSWORD не задан. Показывается один раз: в базе лежит только хэш.
+   */
+  adminPassword?: string
+}
+
+export async function initDatabase(sql: Sql): Promise<InitResult> {
   await ensureSchema(sql)
 
-  for (let i = 0; i < seedCourses.length; i += 1) {
-    const course = seedCourses[i]
-    await sql`
-      INSERT INTO courses (id, data, sort_order)
-      VALUES (${course.id}, ${JSON.stringify(course)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-
-  for (let i = 0; i < seedParticipants.length; i += 1) {
-    const p = seedParticipants[i]
-    await sql`
-      INSERT INTO participants (id, data, sort_order)
-      VALUES (${p.id}, ${JSON.stringify(p)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-  for (let i = 0; i < seedOrders.length; i += 1) {
-    const o = seedOrders[i]
-    await sql`
-      INSERT INTO orders (id, data, sort_order)
-      VALUES (${o.id}, ${JSON.stringify(o)}::jsonb, ${i})
-      ON CONFLICT (id) DO NOTHING
-    `
-  }
-
-  for (const u of defaultUsers) {
-    const hash = await bcrypt.hash(u.password, 10)
-    await sql`
-      INSERT INTO users (id, name, email, role, kind, password_hash)
-      VALUES (${u.id}, ${u.name}, ${u.email}, ${u.role}, ${u.kind}, ${hash})
-      ON CONFLICT (email) DO NOTHING
-    `
-  }
+  const envPassword = process.env.ADMIN_PASSWORD?.trim()
+  const password = envPassword || generatePassword()
+  const hash = await bcrypt.hash(password, 10)
+  const created = await sql`
+    INSERT INTO users (id, name, email, role, kind, password_hash)
+    VALUES (${defaultAdmin.id}, ${defaultAdmin.name}, ${defaultAdmin.email},
+      ${defaultAdmin.role}, ${defaultAdmin.kind}, ${hash})
+    ON CONFLICT (email) DO NOTHING
+    RETURNING id
+  `
+  const adminCreated = created.length > 0
 
   const [{ count: usersCount }] = await sql`SELECT COUNT(*)::int AS count FROM users`
   const [{ count: coursesCount }] = await sql`SELECT COUNT(*)::int AS count FROM courses`
-  return { courses: Number(coursesCount), users: Number(usersCount) }
+  return {
+    courses: Number(coursesCount),
+    users: Number(usersCount),
+    adminCreated,
+    adminEmail: defaultAdmin.email,
+    // Пароль отдаём только когда аккаунт создан и задать его было негде.
+    ...(adminCreated && !envPassword ? { adminPassword: password } : {}),
+  }
 }
