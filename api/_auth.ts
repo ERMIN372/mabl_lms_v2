@@ -5,18 +5,59 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
  * Простая аутентификация по подписанному токену (HMAC-SHA256), без внешних
  * зависимостей. Токен выдаётся при входе и проверяется на защищённых маршрутах.
  *
- * Секрет берётся из AUTH_SECRET; если он не задан, используется строка
- * подключения к БД (она и так есть в проде) или dev-заглушка. В проде стоит
- * задать собственный AUTH_SECRET.
+ * Секрет берётся ТОЛЬКО из AUTH_SECRET. Прежние запасные варианты (строка
+ * подключения к БД и константа в коде) убраны намеренно: константа лежала в
+ * открытом репозитории, то есть в любом окружении без переменных окружения
+ * подпись знал каждый, кто видел исходники, — и мог выписать себе админский
+ * токен. Строка подключения в роли ключа не лучше: её видит всякий, у кого есть
+ * доступ к базе, а её ротация молча разлогинивает всех.
+ *
+ * Вне продакшена, чтобы не мешать локальной разработке, ключ генерируется
+ * случайным при старте процесса: сессии живут до перезапуска и наружу не ходят.
  */
-const SECRET =
-  process.env.AUTH_SECRET ||
-  process.env.DATABASE_URL ||
-  process.env.POSTGRES_URL ||
-  'mabl-insecure-dev-secret'
+const SECRET = resolveSecret()
+
+function resolveSecret(): string {
+  const configured = process.env.AUTH_SECRET?.trim()
+  if (configured) {
+    if (configured.length < 32) {
+      throw new Error(
+        'AUTH_SECRET слишком короткий: нужен не меньше 32 символов случайной строки ' +
+          '(например, вывод `openssl rand -base64 48`).',
+      )
+    }
+    return configured
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'Не задана переменная окружения AUTH_SECRET — секрет подписи токенов сессии. ' +
+        'Задайте её в настройках проекта (например, `openssl rand -base64 48`) и передеплойте.',
+    )
+  }
+  console.warn(
+    '[auth] AUTH_SECRET не задан: вне продакшена используется случайный ключ на время процесса. ' +
+      'Сессии не переживут перезапуск сервера.',
+  )
+  return crypto.randomBytes(48).toString('base64url')
+}
 
 /** Время жизни токена — 7 суток. */
 const TTL_MS = 1000 * 60 * 60 * 24 * 7
+
+/**
+ * Имя cookie с тем же токеном сессии.
+ *
+ * Зачем cookie, если API работает по заголовку Authorization: файлы SCORM-пакета
+ * запрашивает браузер изнутри iframe (и вложенными подзапросами самого пакета),
+ * добавить туда заголовок неоткуда. Cookie уходит с этими запросами сама, и
+ * только по ней раздача `/scorm-store/*` может понять, кто пришёл.
+ *
+ * HttpOnly — чтобы содержимое пакета, исполняемое на нашем же домене, не могло
+ * прочитать сессию через document.cookie. SameSite=Lax достаточно: cookie нужна
+ * только на собственных GET-запросах, а API её не читает — значит, CSRF на
+ * изменяющих маршрутах она не открывает.
+ */
+export const SESSION_COOKIE = 'mabl_session'
 
 export interface TokenPayload {
   id: string
@@ -63,6 +104,57 @@ export function bearer(req: VercelRequest): string | undefined {
   const value = Array.isArray(h) ? h[0] : h
   if (typeof value === 'string' && value.startsWith('Bearer ')) return value.slice(7)
   return undefined
+}
+
+/** Достать токен сессии из cookie (используется раздачей файлов SCORM). */
+export function cookieToken(req: VercelRequest): string | undefined {
+  const raw = req.headers.cookie
+  if (!raw) return undefined
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq < 0) continue
+    if (part.slice(0, eq).trim() !== SESSION_COOKIE) continue
+    try {
+      return decodeURIComponent(part.slice(eq + 1).trim())
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+/**
+ * Сессия запроса с учётом cookie: сначала заголовок Authorization, затем cookie.
+ *
+ * ВАЖНО: применять только на безопасных GET-маршрутах, отдающих файлы (раздача
+ * SCORM). На изменяющих маршрутах авторизация должна оставаться строго по
+ * заголовку Authorization — иначе запрос, отправленный чужим сайтом, приедет с
+ * cookie пользователя и получится CSRF. Сейчас единственный потребитель —
+ * `serveScormFile`.
+ */
+export function browserSession(req: VercelRequest): TokenPayload | null {
+  return verifyToken(bearer(req)) ?? verifyToken(cookieToken(req))
+}
+
+/** Значение Set-Cookie с токеном сессии. */
+export function sessionCookie(token: string): string {
+  const attrs = [
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${Math.floor(TTL_MS / 1000)}`,
+  ]
+  // Secure ломает локальную разработку по http, в проде обязателен.
+  if (process.env.NODE_ENV === 'production') attrs.push('Secure')
+  return attrs.join('; ')
+}
+
+/** Значение Set-Cookie, стирающее сессию (выход). */
+export function clearSessionCookie(): string {
+  const attrs = [`${SESSION_COOKIE}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0']
+  if (process.env.NODE_ENV === 'production') attrs.push('Secure')
+  return attrs.join('; ')
 }
 
 /**

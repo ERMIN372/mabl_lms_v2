@@ -64,6 +64,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     else localStorage.removeItem(STORAGE_KEY)
   }, [user])
 
+  // Сессия, начатая до появления cookie, живёт только в localStorage. Раздача
+  // материалов SCORM читает именно cookie, поэтому подтверждаем сессию серверу
+  // при загрузке приложения — иначе у давно вошедших курсы «не открываются».
+  useEffect(() => {
+    if (user) void api.auth.syncSession()
+  }, [user])
+
   const login = async (email: string, password: string) => {
     const account = await api.auth.login(email, password)
     setUser(account)
@@ -77,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const logout = () => {
-    api.auth.logout()
+    void api.auth.logout()
     setUser(null)
   }
 
