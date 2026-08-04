@@ -21,6 +21,7 @@ import {
   browserSession,
   sessionCookie,
   clearSessionCookie,
+  authSecretProblem,
 } from './_auth.js'
 import { handleUpload, handleUploadPresigned } from '@vercel/blob/client'
 import { list as blobList, del as blobDel, issueSignedToken, presignUrl } from '@vercel/blob'
@@ -56,6 +57,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') return res.status(204).end()
+
+  // Не задан секрет подписи — сессии невозможны. Отвечаем на маршрутах входа
+  // понятным текстом: иначе администратор видит только «Ошибка запроса (500)»
+  // и не может догадаться, что дело в переменной окружения. Остальной сайт при
+  // этом продолжает работать как для гостя.
+  const authProblem = authSecretProblem()
+  if (authProblem && (req.url || '').includes('auth/')) {
+    console.error(`[auth] ${authProblem}`)
+    return res.status(503).json({ message: authProblem })
+  }
 
   // Путь приходит в query-параметре path (из rewrite). Fallback — из req.url.
   const rawPath = req.query.path
@@ -113,6 +124,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (needsAdmin && !requireAdmin(req, res)) return
 
   try {
+    // ---------- ДИАГНОСТИКА ----------
+    // Заданы ли переменные окружения, без которых сайт не работает. Отдаёт
+    // только «да/нет», без значений: когда вход сломан, войти в админку за
+    // диагностикой невозможно, а понять причину надо.
+    if (path === 'health' && method === 'GET') {
+      return res.json({
+        authSecret: Boolean(process.env.AUTH_SECRET?.trim()),
+        database: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL),
+        siteUrl: Boolean(process.env.SITE_URL),
+        problems: [authSecretProblem()].filter(Boolean),
+      })
+    }
+
     // ---------- AUTH ----------
     if (path === 'auth/login' && method === 'POST') {
       return await login(req, res)
