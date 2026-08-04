@@ -61,7 +61,7 @@ export interface Program {
   international?: string
 }
 
-export type CourseFormat = 'scorm' | 'video' | 'longread'
+export type CourseFormat = 'scorm' | 'video' | 'longread' | 'course'
 
 export type CourseLevel = 'Базовый' | 'Продвинутый' | 'Экспертный'
 

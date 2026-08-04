@@ -21,8 +21,8 @@ interface CourseCardProps {
  */
 function CourseCover({ course }: { course: Course }) {
   const { courses } = useCourses()
-  // Океан — для интерактива/чтения (SCORM, лонгрид), Нефть — для видео-программ
-  const isOcean = course.format === 'scorm' || course.format === 'longread'
+  // Океан — для интерактива/чтения (SCORM, лонгрид, курс), Нефть — для видео-программ
+  const isOcean = course.format !== 'video'
   const number = courses.findIndex((c) => c.id === course.id) + 1
 
   return (
