@@ -23,6 +23,7 @@ function normalizeUser(raw: unknown): User | null {
     email: u.email,
     role: u.role ?? 'Слушатель академии',
     kind: u.kind === 'admin' ? 'admin' : 'student',
+    emailVerified: Boolean(u.emailVerified),
   }
 }
 
@@ -31,11 +32,19 @@ interface AuthContextValue {
   isAuthenticated: boolean
   isAdmin: boolean
   login: (email: string, password: string) => Promise<User>
-  register: (input: { name: string; email: string; password: string }) => Promise<User>
+  register: (input: {
+    name: string
+    email: string
+    password: string
+  }) => Promise<{ user: User; codeError?: string }>
   logout: () => void
   recover: (email: string) => Promise<string>
   /** Задать новый пароль по ссылке из письма: сервер сразу открывает сессию. */
   resetPassword: (token: string, password: string) => Promise<User>
+  /** Подтвердить e-mail кодом из письма. */
+  verifyEmail: (code: string) => Promise<void>
+  /** Выслать код подтверждения повторно. */
+  resendCode: () => Promise<string>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -62,9 +71,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const register = async (input: { name: string; email: string; password: string }) => {
-    const account = await api.auth.register(input)
-    setUser(account)
-    return account
+    const result = await api.auth.register(input)
+    setUser(result.user)
+    return result
   }
 
   const logout = () => {
@@ -80,6 +89,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return account
   }
 
+  const verifyEmail = async (code: string) => {
+    await api.auth.verifyEmail(code)
+    setUser((prev) => (prev ? { ...prev, emailVerified: true } : prev))
+  }
+
+  const resendCode = () => api.auth.resendCode()
+
+  // Признак подтверждённой почты меняется на сервере (подтверждение с другого
+  // устройства, переход по ссылке сброса), а копия профиля лежит в браузере —
+  // поэтому при загрузке приложения перечитываем профиль.
+  useEffect(() => {
+    if (!user || user.emailVerified) return
+    let active = true
+    void api.auth
+      .me()
+      .then((fresh) => active && setUser((prev) => (prev ? { ...prev, ...fresh } : prev)))
+      .catch(() => {
+        /* сессия истекла — вход попросят при следующем действии */
+      })
+    return () => {
+      active = false
+    }
+    // Достаточно одной сверки на вход в приложение.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id])
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
@@ -90,6 +125,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       recover,
       resetPassword,
+      verifyEmail,
+      resendCode,
     }),
     [user],
   )

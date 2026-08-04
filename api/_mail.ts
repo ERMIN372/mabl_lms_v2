@@ -153,6 +153,99 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;')
 }
 
+/** Имя для обращения: первое слово из полного имени. */
+function firstName(name: string): string {
+  return (name ?? '').trim().split(/\s+/)[0] || 'Коллега'
+}
+
+/**
+ * Содержимое письма в общем брендовом шаблоне. Все письма академии собираются
+ * через него: одинаковая шапка, типографика и подвал, а различается только
+ * текст, код или кнопка.
+ */
+interface MailContent {
+  heading: string
+  paragraphs: string[]
+  /** Крупный код подтверждения. */
+  code?: string
+  button?: { label: string; url: string }
+  footnote?: string
+}
+
+function renderText(content: MailContent): string {
+  const lines = [content.heading, '', ...content.paragraphs]
+  if (content.code) lines.push('', `Код: ${content.code}`)
+  if (content.button) lines.push('', `${content.button.label}: ${content.button.url}`)
+  if (content.footnote) lines.push('', content.footnote)
+  lines.push(
+    '',
+    'МАБЛ · Международная академия бизнес лидерства',
+    'Sapere · Ducere — Знать, чтобы лидировать',
+  )
+  return lines.join('\n')
+}
+
+// Брендовая палитра: Нефть #212128, Океан #3552AF, Мудрость #FFFFFF.
+function renderHtml(content: MailContent): string {
+  const paragraphs = content.paragraphs
+    .map(
+      (p) =>
+        `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#3c3c46;">${escapeHtml(p)}</p>`,
+    )
+    .join('')
+
+  const code = content.code
+    ? `<div style="margin:28px 0;padding:20px;background:#f4f5f8;border-radius:12px;text-align:center;">
+         <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#70707d;">Код подтверждения</div>
+         <div style="margin-top:8px;font-size:34px;letter-spacing:.28em;font-weight:600;color:#212128;">${escapeHtml(content.code)}</div>
+       </div>`
+    : ''
+
+  const button = content.button
+    ? `<div style="margin:28px 0;">
+         <a href="${escapeHtml(content.button.url)}" style="display:inline-block;padding:14px 28px;background:#3552AF;color:#ffffff;text-decoration:none;border-radius:8px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;font-weight:600;">${escapeHtml(content.button.label)}</a>
+       </div>
+       <p style="margin:0 0 16px;font-size:12px;line-height:1.6;color:#70707d;word-break:break-all;">Если кнопка не работает, откройте ссылку: ${escapeHtml(content.button.url)}</p>`
+    : ''
+
+  const footnote = content.footnote
+    ? `<p style="margin:24px 0 0;font-size:12px;line-height:1.6;color:#70707d;">${escapeHtml(content.footnote)}</p>`
+    : ''
+
+  return `<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f5f8;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f8;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e6e7ec;">
+        <tr><td style="background:#212128;padding:28px 32px;">
+          <div style="font-size:18px;letter-spacing:.18em;text-transform:uppercase;color:#ffffff;font-weight:600;">МАБЛ</div>
+          <div style="margin-top:6px;font-size:11px;letter-spacing:.1em;color:rgba(255,255,255,.55);">Международная академия бизнес лидерства</div>
+        </td></tr>
+        <tr><td style="padding:32px;">
+          <h1 style="margin:0 0 20px;font-size:22px;line-height:1.3;color:#212128;font-weight:600;">${escapeHtml(content.heading)}</h1>
+          ${paragraphs}
+          ${code}
+          ${button}
+          ${footnote}
+        </td></tr>
+        <tr><td style="padding:20px 32px;border-top:1px solid #e6e7ec;background:#fafafb;">
+          <p style="margin:0;font-size:11px;line-height:1.6;color:#70707d;">
+            Sapere · Ducere — Знать, чтобы лидировать<br>
+            Письмо отправлено автоматически, отвечать на него не нужно.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`
+}
+
+/** Собрать письмо из содержимого и темы. */
+function compose(to: string, subject: string, content: MailContent): MailMessage {
+  return { to, subject, html: renderHtml(content), text: renderText(content) }
+}
+
 /** Письмо со ссылкой на восстановление пароля. */
 export function passwordResetMessage(params: {
   to: string
@@ -160,45 +253,62 @@ export function passwordResetMessage(params: {
   link: string
   ttlHours: number
 }): MailMessage {
-  const name = escapeHtml(params.name || 'Коллега')
-  const link = escapeHtml(params.link)
-  const text = [
-    `${params.name || 'Здравствуйте'}!`,
-    '',
-    'Вы запросили восстановление доступа к личному кабинету МАБЛ.',
-    'Чтобы задать новый пароль, откройте ссылку:',
-    params.link,
-    '',
-    `Ссылка действует ${params.ttlHours} ч. и только один раз.`,
-    'Если восстановление запрашивали не вы — просто удалите это письмо: пароль останется прежним.',
-    '',
-    'Международная академия бизнес-лидерства (МАБЛ)',
-  ].join('\n')
+  return compose(params.to, 'Восстановление доступа — МАБЛ', {
+    heading: `${firstName(params.name)}, восстановление доступа`,
+    paragraphs: [
+      'Мы получили запрос на смену пароля от личного кабинета МАБЛ.',
+      `Нажмите кнопку ниже и задайте новый пароль. Ссылка действует ${params.ttlHours} ч. и сработает один раз.`,
+    ],
+    button: { label: 'Задать новый пароль', url: params.link },
+    footnote:
+      'Если вы не запрашивали смену пароля, ничего делать не нужно — текущий пароль продолжит работать.',
+  })
+}
 
-  const html = `
-<div style="font-family:Helvetica,Arial,sans-serif;font-size:16px;line-height:1.6;color:#1b1b1b">
-  <p>${name}, здравствуйте!</p>
-  <p>Вы запросили восстановление доступа к личному кабинету МАБЛ. Нажмите кнопку, чтобы задать новый пароль:</p>
-  <p style="margin:28px 0">
-    <a href="${link}" style="background:#12233b;color:#ffffff;text-decoration:none;padding:14px 28px;border-radius:8px;display:inline-block">
-      Задать новый пароль
-    </a>
-  </p>
-  <p style="font-size:14px;color:#5b5b5b">
-    Если кнопка не открывается, скопируйте ссылку в адресную строку браузера:<br />
-    <a href="${link}">${link}</a>
-  </p>
-  <p style="font-size:14px;color:#5b5b5b">
-    Ссылка действует ${params.ttlHours} ч. и срабатывает один раз.
-    Если восстановление запрашивали не вы — просто удалите это письмо, пароль останется прежним.
-  </p>
-  <p style="font-size:14px;color:#5b5b5b">Международная академия бизнес-лидерства (МАБЛ)</p>
-</div>`.trim()
+/**
+ * Письмо с кодом подтверждения e-mail. `welcome` — первое письмо сразу после
+ * регистрации: у него другой заголовок и тема.
+ */
+export function verificationCodeMessage(params: {
+  to: string
+  name: string
+  code: string
+  ttlMinutes: number
+  welcome?: boolean
+}): MailMessage {
+  const subject = params.welcome ? 'Подтвердите e-mail — МАБЛ' : `Код подтверждения: ${params.code}`
+  return compose(params.to, subject, {
+    heading: params.welcome
+      ? `${firstName(params.name)}, добро пожаловать в МАБЛ`
+      : 'Подтверждение e-mail',
+    paragraphs: params.welcome
+      ? [
+          'Аккаунт в личном кабинете академии создан. Осталось подтвердить адрес — это нужно, чтобы вы могли восстановить пароль и получать письма о доступе к программам.',
+          `Введите код на сайте. Он действует ${params.ttlMinutes} минут.`,
+        ]
+      : [
+          `Введите этот код на сайте, чтобы подтвердить адрес. Он действует ${params.ttlMinutes} минут.`,
+        ],
+    code: params.code,
+    footnote:
+      'Если вы не регистрировались в МАБЛ, просто удалите это письмо — аккаунт останется неподтверждённым.',
+  })
+}
 
-  return {
-    to: params.to,
-    subject: 'Восстановление доступа к личному кабинету МАБЛ',
-    html,
-    text,
-  }
+/** Письмо об открытом доступе к программе (после подтверждённой оплаты). */
+export function courseAccessMessage(params: {
+  to: string
+  name: string
+  courseTitle: string
+  courseUrl: string
+}): MailMessage {
+  return compose(params.to, `Доступ к программе «${params.courseTitle}» открыт`, {
+    heading: `${firstName(params.name)}, доступ открыт`,
+    paragraphs: [
+      `Оплата получена, программа «${params.courseTitle}» добавлена в ваш личный кабинет.`,
+      'Материалы доступны в любой момент — с компьютера и с телефона, после входа в кабинет.',
+    ],
+    button: { label: 'Перейти к обучению', url: params.courseUrl },
+    footnote: 'Кассовый чек придёт отдельным письмом от ЮKassa.',
+  })
 }

@@ -44,8 +44,10 @@ export default function LoginPage() {
     setInfo('')
     setLoading(true)
     try {
-      await register({ name, email, password })
-      navigate(from, { replace: true })
+      const { codeError } = await register({ name, email, password })
+      // Аккаунт создан в любом случае; ведём на подтверждение почты и, если
+      // письмо не ушло, честно говорим об этом — там же можно повторить.
+      navigate('/verify-email', { replace: true, state: { from, codeError } })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать аккаунт')
     } finally {

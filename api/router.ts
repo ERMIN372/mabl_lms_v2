@@ -3,6 +3,12 @@ import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 import { getSql } from './_db.js'
 import { mailConfigProblems, mailTransport, passwordResetMessage, sendMail } from './_mail.js'
+import {
+  CODE_TTL_MIN,
+  sendCourseAccessEmail,
+  sendVerificationCode,
+  verifyEmailCode,
+} from './_accounts.js'
 import { ensureSchema, initDatabase } from './_seed.js'
 import { findDemoRows, purgeDemoRows } from './_demo.js'
 import { syncTelegramNews } from './_telegram.js'
@@ -76,6 +82,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     path === 'auth/register' ||
     path === 'auth/recover' ||
     path === 'auth/reset' ||
+    // Подтверждение почты делает сам владелец аккаунта: права проверяются
+    // внутри обработчика по токену сессии, а не по правам администратора.
+    path === 'auth/verify-email' ||
+    path === 'auth/resend-code' ||
     // Оплату инициирует слушатель: права проверяются внутри обработчика по
     // токену сессии (а не по правам администратора).
     path === 'payments/create' ||
@@ -105,6 +115,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (path === 'auth/reset' && method === 'POST') {
       return await resetPassword(req, res)
+    }
+    if (path === 'auth/verify-email' && method === 'POST') {
+      return await verifyEmail(req, res)
+    }
+    if (path === 'auth/resend-code' && method === 'POST') {
+      return await resendVerificationCode(req, res)
+    }
+
+    // Актуальный профиль: статус подтверждения почты меняется на сервере, и
+    // сохранённая в браузере копия про это не знает.
+    if (path === 'me' && method === 'GET') {
+      return await currentProfile(req, res)
     }
 
     // ---------- ДОСТУП ПОЛЬЗОВАТЕЛЯ ----------
@@ -479,8 +501,9 @@ async function login(req: VercelRequest, res: VercelResponse) {
   }
 
   const sql = getSql()
+  await ensureSchema(sql)
   const rows = await sql`
-    SELECT id, name, email, role, kind, password_hash
+    SELECT id, name, email, role, kind, password_hash, email_verified
     FROM users WHERE email = ${normalized} LIMIT 1
   `
   const row = rows[0]
@@ -499,6 +522,7 @@ async function login(req: VercelRequest, res: VercelResponse) {
     email: row.email as string,
     role: row.role as string,
     kind: (row.kind as User['kind']) ?? 'student',
+    emailVerified: Boolean(row.email_verified),
   }
   const token = signToken({ id: user.id, kind: user.kind })
   return res.json({ ...user, token })
@@ -554,12 +578,106 @@ async function register(req: VercelRequest, res: VercelResponse) {
     ON CONFLICT (id) DO NOTHING
   `
 
-  const user: User = { id, name, email, role, kind: 'student' }
-  return res.status(201).json({ ...user, token: signToken({ id, kind: 'student' }) })
+  // Письмо с приветствием и кодом подтверждения. Регистрацию не роняем:
+  // аккаунт уже создан, а неотправленное письмо слушатель запросит повторно
+  // со страницы подтверждения. Причина отказа возвращается в ответе, чтобы
+  // проблема с почтой была видна сразу, а не «где-то в логах».
+  let codeError: string | undefined
+  if (mailConfigProblems().length > 0) {
+    codeError = 'Отправка писем на сервере не настроена — код подтверждения не ушёл.'
+    console.error(`[auth/register] ${codeError}`)
+  } else {
+    const sent = await sendVerificationCode(sql, { id, name, email }, { welcome: true })
+    if (!sent.ok) codeError = sent.message
+  }
+
+  const user: User = { id, name, email, role, kind: 'student', emailVerified: false }
+  return res.status(201).json({
+    ...user,
+    token: signToken({ id, kind: 'student' }),
+    ...(codeError ? { codeError } : {}),
+  })
+}
+
+/** GET /api/me — актуальный профиль по токену сессии. */
+async function currentProfile(req: VercelRequest, res: VercelResponse) {
+  const account = verifyToken(bearer(req))
+  if (!account) return res.status(401).json({ message: 'Сессия недействительна. Войдите заново.' })
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    SELECT id, name, email, role, kind, email_verified FROM users WHERE id = ${account.id} LIMIT 1
+  `
+  const row = rows[0]
+  if (!row) return res.status(401).json({ message: 'Аккаунт не найден. Войдите заново.' })
+  return res.json({
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role,
+    kind: row.kind,
+    emailVerified: Boolean(row.email_verified),
+  })
+}
+
+/** POST /api/auth/verify-email — подтвердить почту кодом из письма. */
+async function verifyEmail(req: VercelRequest, res: VercelResponse) {
+  const account = verifyToken(bearer(req))
+  if (!account) return res.status(401).json({ message: 'Войдите в аккаунт, чтобы подтвердить e-mail.' })
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const { code } = parseBody(req)
+  const result = await verifyEmailCode(sql, account.id, String(code ?? ''))
+  if (!result.ok) return res.status(400).json({ message: result.message })
+  return res.json({ ok: true, emailVerified: true })
+}
+
+/** POST /api/auth/resend-code — выслать код подтверждения повторно. */
+async function resendVerificationCode(req: VercelRequest, res: VercelResponse) {
+  const account = verifyToken(bearer(req))
+  if (!account) return res.status(401).json({ message: 'Войдите в аккаунт, чтобы получить код.' })
+
+  const problems = mailConfigProblems()
+  if (problems.length > 0) {
+    console.error(`[auth/resend-code] отправка писем не настроена: ${problems.join(' ')}`)
+    return res.status(503).json({
+      message:
+        'Отправка писем на сервере не настроена. Администратору: задайте переменные окружения ' +
+        'почты (SMTP_HOST, SMTP_USER, SMTP_PASSWORD, MAIL_FROM) — состояние видно в админке, ' +
+        'раздел «База данных» → «Отправка писем».',
+    })
+  }
+
+  const sql = getSql()
+  await ensureSchema(sql)
+  const rows = await sql`
+    SELECT id, name, email, email_verified FROM users WHERE id = ${account.id} LIMIT 1
+  `
+  const row = rows[0]
+  if (!row) return res.status(401).json({ message: 'Аккаунт не найден. Войдите заново.' })
+  if (row.email_verified) return res.json({ message: 'E-mail уже подтверждён.', sent: false })
+
+  const result = await sendVerificationCode(sql, {
+    id: row.id as string,
+    name: row.name as string,
+    email: row.email as string,
+  })
+  if (!result.ok) {
+    return res.status(429).json({ message: result.message, retryAfterSec: result.retryAfterSec })
+  }
+  return res.json({
+    message: `Код отправлен на ${row.email}. Он действует ${CODE_TTL_MIN} минут.`,
+    sent: true,
+  })
 }
 
 /** Сколько живёт ссылка восстановления пароля. */
 const RESET_TTL_HOURS = 2
+
+/** Не больше трёх писем восстановления на аккаунт в час. */
+const RESET_MAX_PER_HOUR = 3
 
 /** Хэш токена восстановления: в базе храним только его. */
 function hashResetToken(token: string): string {
@@ -609,6 +727,18 @@ async function recoverPassword(req: VercelRequest, res: VercelResponse) {
   // Адреса нет в базе — отвечаем так же, как при успехе, но письмо не шлём.
   if (!user) {
     console.log(`[auth/recover] запрос для незарегистрированного адреса ${normalized}`)
+    return res.json(okMessage)
+  }
+
+  // Не больше трёх писем в час на аккаунт: иначе форма превращается в
+  // бесплатный рассыльщик с нашего ящика и топит репутацию домена. Ответ тот
+  // же самый — по нему по-прежнему нельзя понять, есть ли такой аккаунт.
+  const [{ recent }] = await sql`
+    SELECT COUNT(*)::int AS recent FROM password_resets
+    WHERE user_id = ${user.id as string} AND created_at > NOW() - INTERVAL '1 hour'
+  `
+  if (Number(recent) >= RESET_MAX_PER_HOUR) {
+    console.warn(`[auth/recover] превышен лимит писем для ${normalized}`)
     return res.json(okMessage)
   }
 
@@ -682,7 +812,9 @@ async function resetPassword(req: VercelRequest, res: VercelResponse) {
   if (!row) return res.status(400).json({ message: 'Аккаунт не найден.' })
 
   const hash = await bcrypt.hash(password, 10)
-  await sql`UPDATE users SET password_hash = ${hash} WHERE id = ${row.id as string}`
+  // Переход по ссылке из письма доказывает владение почтой — заодно
+  // подтверждаем адрес, чтобы не гонять человека ещё и через ввод кода.
+  await sql`UPDATE users SET password_hash = ${hash}, email_verified = TRUE WHERE id = ${row.id as string}`
   await sql`UPDATE password_resets SET used_at = NOW() WHERE token_hash = ${hashResetToken(token)}`
 
   const user: User = {
@@ -691,6 +823,7 @@ async function resetPassword(req: VercelRequest, res: VercelResponse) {
     email: row.email as string,
     role: row.role as string,
     kind: (row.kind as User['kind']) ?? 'student',
+    emailVerified: true,
   }
   return res.json({ ...user, token: signToken({ id: user.id, kind: user.kind }) })
 }
@@ -1169,7 +1302,10 @@ async function createCoursePayment(req: VercelRequest, res: VercelResponse) {
 }
 
 /** Применить актуальный статус платежа ЮKassa к заказу в БД. */
-async function applyPaymentStatus(payment: { id: string; status: string; metadata?: Record<string, string> }) {
+async function applyPaymentStatus(
+  payment: { id: string; status: string; metadata?: Record<string, string> },
+  origin?: string,
+) {
   const sql = getSql()
   await ensureSchema(sql)
   const orderId = payment.metadata?.orderId
@@ -1186,6 +1322,26 @@ async function applyPaymentStatus(payment: { id: string; status: string; metadat
         : 'pending'
   if (order.status === nextStatus) return order
   const next: Order = { ...order, status: nextStatus }
+
+  // Письмо об открытом доступе — один раз на заказ. Отметку храним в самом
+  // заказе: повторный вызов (webhook и страница возврата приходят оба) не
+  // должен слать слушателю второе письмо.
+  if (nextStatus === 'paid' && !next.accessEmailSentAt && mailConfigProblems().length === 0) {
+    const course = await getCourse(next.courseId)
+    const users = await sql`SELECT name, email FROM users WHERE id = ${next.userId} LIMIT 1`
+    const to = (next.email || (users[0]?.email as string) || '').trim()
+    if (course && to) {
+      const sent = await sendCourseAccessEmail({
+        to,
+        name: (users[0]?.name as string) || '',
+        courseTitle: course.title,
+        courseId: course.id,
+        origin: origin || process.env.SITE_URL || '',
+      })
+      if (sent) next.accessEmailSentAt = new Date().toISOString()
+    }
+  }
+
   await sql`UPDATE orders SET data = ${JSON.stringify(next)}::jsonb, updated_at = NOW() WHERE id = ${order.id}`
   return next
 }
@@ -1202,7 +1358,7 @@ async function handlePaymentWebhook(req: VercelRequest, res: VercelResponse) {
     const paymentId = body.object?.id
     if (!paymentId) return res.status(400).json({ message: 'no payment id' })
     const payment = await getPayment(String(paymentId))
-    await applyPaymentStatus(payment)
+    await applyPaymentStatus(payment, siteOrigin(req))
   } catch (err) {
     console.error('[payments] webhook error:', err)
     // Возвращаем 200, чтобы ЮKassa не зациклила ретраи на нашей ошибке БД.
@@ -1221,7 +1377,7 @@ async function getPaymentStatus(id: string, req: VercelRequest, res: VercelRespo
   }
   if (!isYooKassaConfigured()) return res.status(503).json({ message: 'Онлайн-оплата недоступна.' })
   const payment = await getPayment(id)
-  const order = await applyPaymentStatus(payment)
+  const order = await applyPaymentStatus(payment, siteOrigin(req))
   return res.json({ paymentId: payment.id, status: payment.status, paid: payment.status === 'succeeded', orderId: order?.id })
 }
 
@@ -1245,7 +1401,7 @@ async function getOrderPaymentStatus(orderId: string, req: VercelRequest, res: V
     return res.json({ orderId, status: order.status, paid: order.status === 'paid' })
   }
   const payment = await getPayment(order.paymentId)
-  const updated = await applyPaymentStatus(payment)
+  const updated = await applyPaymentStatus(payment, siteOrigin(req))
   return res.json({
     orderId,
     status: (updated ?? order).status,
