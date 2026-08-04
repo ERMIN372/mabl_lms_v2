@@ -6,6 +6,7 @@ import { Crest } from '@/components/brand/Crest'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AuthContext'
+import { safeRedirectPath } from '@/lib/utils'
 
 /**
  * Подтверждение e-mail шестизначным кодом из письма.
@@ -19,7 +20,7 @@ export default function VerifyEmailPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const state = (location.state ?? {}) as { from?: string; codeError?: string }
-  const next = state.from || '/dashboard'
+  const next = safeRedirectPath(state.from)
 
   const [code, setCode] = useState('')
   const [error, setError] = useState(state.codeError ?? '')

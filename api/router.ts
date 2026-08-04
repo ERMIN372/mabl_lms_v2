@@ -52,10 +52,16 @@ import type {
  * заказы, участники) хранятся в БД Neon и наполняются из админ-панели.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS — нужен для POST/PUT/DELETE из браузера.
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  // CORS. Раньше стояло `*` — любой сторонний сайт мог дёргать API и читать
+  // ответы. Свой фронтенд ходит с того же домена и в CORS не нуждается вовсе,
+  // поэтому пропускаем только собственные домены (и localhost в разработке).
+  const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin
+  if (origin && isAllowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Vary', 'Origin')
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  }
   if (req.method === 'OPTIONS') return res.status(204).end()
 
   // Не задан секрет подписи — сессии невозможны. Отвечаем на маршрутах входа
@@ -107,6 +113,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // внутри обработчика по токену сессии, а не по правам администратора.
     path === 'auth/verify-email' ||
     path === 'auth/resend-code' ||
+    // Отчёт о нарушении CSP присылает браузер — без всякой авторизации.
+    path === 'csp-report' ||
     // Оплату инициирует слушатель: права проверяются внутри обработчика по
     // токену сессии (а не по правам администратора).
     path === 'payments/create' ||
@@ -129,12 +137,37 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // только «да/нет», без значений: когда вход сломан, войти в админку за
     // диагностикой невозможно, а понять причину надо.
     if (path === 'health' && method === 'GET') {
+      // Доступ по SETUP_SECRET или админскому токену. Отдавать состояние
+      // конфигурации всем подряд незачем: это подсказка атакующему, что на
+      // сервере настроено, а что нет. Секрет в адресе оставлен намеренно —
+      // проверка нужна именно тогда, когда вход сломан и токена не получить.
+      const secretParam = typeof req.query.secret === 'string' ? req.query.secret : ''
+      const bySecret =
+        Boolean(process.env.SETUP_SECRET) && secretParam === process.env.SETUP_SECRET
+      if (!bySecret && verifyToken(bearer(req))?.kind !== 'admin') {
+        return res.status(403).json({ message: 'Нет доступа к диагностике.' })
+      }
       return res.json({
         authSecret: Boolean(process.env.AUTH_SECRET?.trim()),
         database: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL),
         siteUrl: Boolean(process.env.SITE_URL),
         problems: [authSecretProblem()].filter(Boolean),
       })
+    }
+
+    // Приём нарушений CSP (политика включена в режиме отчётов). Тело шлёт
+    // браузер, поэтому доверять ему нельзя: берём только несколько известных
+    // полей и обрезаем длину — иначе эндпоинт превращается в способ засорить
+    // логи произвольным текстом.
+    if (path === 'csp-report' && method === 'POST') {
+      const body = parseBody(req) as { 'csp-report'?: Record<string, unknown> }
+      const r = body['csp-report'] ?? {}
+      const short = (v: unknown) => String(v ?? '').slice(0, 300)
+      console.warn(
+        `[csp] нарушение: directive=${short(r['violated-directive'])} ` +
+          `blocked=${short(r['blocked-uri'])} document=${short(r['document-uri'])}`,
+      )
+      return res.status(204).end()
     }
 
     // ---------- AUTH ----------
@@ -526,9 +559,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(404).json({ message: `Маршрут не найден: ${method} /api/${path}` })
   } catch (err: unknown) {
-    console.error('API error:', err)
-    const message = err instanceof Error ? err.message : String(err)
-    return res.status(500).json({ message })
+    // Наружу — нейтральный текст и код инцидента. Раньше сюда уходило
+    // err.message: ошибки Neon и Vercel Blob раскрывали имена таблиц и колонок,
+    // структуру хранилища, иногда куски конфигурации. Подробности — в логах,
+    // найти их по коду можно за секунды.
+    const incident = crypto.randomBytes(6).toString('hex')
+    console.error(`API error [${incident}] ${method} /${path}:`, err)
+    return res.status(500).json({
+      message: `Внутренняя ошибка сервера. Код обращения: ${incident} — назовите его администратору.`,
+      incident,
+    })
   }
 }
 
@@ -1466,6 +1506,9 @@ function isTrustedHost(host: string): boolean {
   }
   const allowed = new Set(
     [
+      // Канонический адрес сайта — тоже свой домен. Без него CORS отклонял бы
+      // собственный фронтенд, если ALLOWED_HOSTS не задан.
+      process.env.SITE_URL,
       process.env.VERCEL_PROJECT_PRODUCTION_URL,
       process.env.VERCEL_URL,
       ...(process.env.ALLOWED_HOSTS ?? '').split(','),
@@ -1474,6 +1517,22 @@ function isTrustedHost(host: string): boolean {
       .filter(Boolean),
   )
   return allowed.has(bare) || allowed.has(host)
+}
+
+/**
+ * Свой ли origin запроса. Отдельные превью-деплои Vercel живут на доменах вида
+ * `<проект>-<хэш>.vercel.app`, поэтому их тоже пропускаем: иначе админка на
+ * превью не сможет обратиться к своему же API.
+ */
+function isAllowedOrigin(origin: string): boolean {
+  let host: string
+  try {
+    host = new URL(origin).host.toLowerCase()
+  } catch {
+    return false
+  }
+  if (isTrustedHost(host)) return true
+  return host.endsWith('.vercel.app')
 }
 
 /**

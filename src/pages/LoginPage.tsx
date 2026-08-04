@@ -6,12 +6,15 @@ import { Crest } from '@/components/brand/Crest'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AuthContext'
+import { safeRedirectPath } from '@/lib/utils'
 
 export default function LoginPage() {
   const { login, register, recover } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const from = (location.state as { from?: string })?.from || '/dashboard'
+  // Адрес возврата приходит из location.pathname, то есть из адресной строки —
+  // пропускаем только собственные пути (см. safeRedirectPath).
+  const from = safeRedirectPath((location.state as { from?: string })?.from)
 
   const [mode, setMode] = useState<'login' | 'register' | 'recover'>('login')
   const [name, setName] = useState('')
