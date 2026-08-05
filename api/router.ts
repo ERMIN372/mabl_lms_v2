@@ -9,6 +9,34 @@ import {
   sendVerificationCode,
   verifyEmailCode,
 } from './_accounts.js'
+import {
+  clientIp,
+  hitRateLimit,
+  purgeStaleRateLimits,
+  resetRateLimit,
+  tooManyRequests,
+} from './_ratelimit.js'
+
+// ---------------- лимиты частоты ----------------
+// Значения подобраны так, чтобы не мешать живому человеку: обычный вход
+// укладывается в пару попыток, а перебор становится бессмысленно медленным.
+
+/** Окно для попыток входа — 15 минут. */
+const LOGIN_WINDOW_SEC = 15 * 60
+/** Попыток входа в один аккаунт за окно. */
+const LOGIN_MAX_PER_EMAIL = 5
+/** Попыток входа с одного адреса за окно: с запасом на общий офисный IP. */
+const LOGIN_MAX_PER_IP = 25
+/** Окно для регистраций и заявок — час. */
+const SIGNUP_WINDOW_SEC = 60 * 60
+/** Регистраций с одного адреса в час. */
+const REGISTER_MAX_PER_IP = 5
+/** Заявок на поступление с одного адреса в час. */
+const APPLICATION_MAX_PER_IP = 5
+/** Запросов восстановления пароля с одного адреса в час. */
+const RECOVER_MAX_PER_IP = 10
+/** Ручных синхронизаций новостей в час, когда CRON_SECRET не задан. */
+const NEWS_SYNC_MAX_PER_HOUR = 4
 import { ensureSchema, initDatabase } from './_seed.js'
 import { findDemoRows, purgeDemoRows } from './_demo.js'
 import { syncTelegramNews } from './_telegram.js'
@@ -262,9 +290,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // ---------- NEWS (БД + импорт из Telegram) ----------
     // Синхронизация из Telegram-канала. GET — вызывается Vercel Cron,
     // POST — кнопкой «Обновить из Telegram» в админ-панели.
+    // POST закрыт правами администратора (см. isPublicMutation), а GET дёргает
+    // Vercel Cron — и раньше его мог дёргать кто угодно, сколько угодно раз.
+    // Каждый вызов ходит в Telegram и переписывает всю таблицу новостей.
     if (path === 'news/sync' && (method === 'GET' || method === 'POST')) {
       const sql = getSql()
+      if (method === 'GET') {
+        const guard = await allowNewsSync(req, sql)
+        if (!guard.ok) return guard.deny(res)
+      }
       const result = await syncTelegramNews(sql)
+      // Заодно прибираем отжившие счётчики частоты: отдельное расписание ради
+      // одной операции в сутки заводить незачем.
+      await purgeStaleRateLimits(sql)
       return res.json({ ok: true, ...result })
     }
     if (path === 'news' && method === 'GET') return res.json(await listNews())
@@ -590,6 +628,38 @@ function found(res: VercelResponse, value: unknown, notFoundMsg: string) {
   return value ? res.json(value) : res.status(404).json({ message: notFoundMsg })
 }
 
+/**
+ * Пускать ли синхронизацию новостей по GET.
+ *
+ * Правильный ключ — CRON_SECRET: если он задан в проекте, Vercel Cron сам
+ * присылает его в заголовке Authorization, и посторонний вызов отсекается
+ * начисто. Пока он не задан, ломать ежедневную синхронизацию нельзя (запросы
+ * от планировщика ничем не подписаны), поэтому ограничиваемся частотой и
+ * подсказываем администратору в логах, как закрыть маршрут по-настоящему.
+ */
+async function allowNewsSync(
+  req: VercelRequest,
+  sql: ReturnType<typeof getSql>,
+): Promise<{ ok: true } | { ok: false; deny: (res: VercelResponse) => unknown }> {
+  const cronSecret = process.env.CRON_SECRET?.trim()
+  if (cronSecret) {
+    if (bearer(req) === cronSecret || verifyToken(bearer(req))?.kind === 'admin') return { ok: true }
+    return {
+      ok: false,
+      deny: (res) => res.status(403).json({ message: 'Синхронизация доступна планировщику и администратору.' }),
+    }
+  }
+
+  console.warn(
+    '[news/sync] CRON_SECRET не задан — маршрут открыт всем и защищён только ограничением ' +
+      'частоты. Задайте CRON_SECRET в настройках проекта: Vercel Cron будет присылать его сам.',
+  )
+  await ensureSchema(sql)
+  const limit = await hitRateLimit(sql, 'news-sync', clientIp(req), NEWS_SYNC_MAX_PER_HOUR, 60 * 60)
+  if (limit.allowed) return { ok: true }
+  return { ok: false, deny: (res) => tooManyRequests(res, limit, 'Синхронизация уже выполнялась недавно.') }
+}
+
 async function login(req: VercelRequest, res: VercelResponse) {
   const { email, password } = parseBody(req)
   const normalized = String(email ?? '').trim().toLowerCase()
@@ -599,6 +669,27 @@ async function login(req: VercelRequest, res: VercelResponse) {
 
   const sql = getSql()
   await ensureSchema(sql)
+
+  // Лимиты ДО сверки пароля — иначе каждая попытка стоит нам вычисления bcrypt,
+  // и перебор превращается в дешёвый способ загрузить функции и увеличить счёт
+  // за хостинг. Два ключа: по аккаунту (перебор пароля к конкретному адресу,
+  // хоть бы и с разных адресов) и по IP (перебор по многим аккаунтам подряд).
+  const ip = clientIp(req)
+  const byAccount = await hitRateLimit(sql, 'login:email', normalized, LOGIN_MAX_PER_EMAIL, LOGIN_WINDOW_SEC)
+  if (!byAccount.allowed) {
+    console.warn(`[login] превышен лимит попыток для ${normalized} (ip ${ip || 'неизвестен'})`)
+    return tooManyRequests(
+      res,
+      byAccount,
+      'Слишком много попыток входа в этот аккаунт. Попробуйте позже или восстановите пароль.',
+    )
+  }
+  const byIp = await hitRateLimit(sql, 'login:ip', ip, LOGIN_MAX_PER_IP, LOGIN_WINDOW_SEC)
+  if (!byIp.allowed) {
+    console.warn(`[login] превышен лимит попыток с ip ${ip}`)
+    return tooManyRequests(res, byIp, 'Слишком много попыток входа. Попробуйте позже.')
+  }
+
   const rows = await sql`
     SELECT id, name, email, role, kind, password_hash, email_verified
     FROM users WHERE email = ${normalized} LIMIT 1
@@ -621,6 +712,11 @@ async function login(req: VercelRequest, res: VercelResponse) {
     kind: (row.kind as User['kind']) ?? 'student',
     emailVerified: Boolean(row.email_verified),
   }
+  // Вход удался — счётчики этого аккаунта и адреса обнуляем, чтобы обычный
+  // человек, вспомнивший пароль с пятой попытки, не остался заблокированным.
+  await resetRateLimit(sql, 'login:email', normalized)
+  await resetRateLimit(sql, 'login:ip', ip)
+
   const token = signToken({ id: user.id, kind: user.kind })
   res.setHeader('Set-Cookie', sessionCookie(token))
   return res.json({ ...user, token })
@@ -644,6 +740,20 @@ async function register(req: VercelRequest, res: VercelResponse) {
 
   const sql = getSql()
   await ensureSchema(sql)
+
+  // Иначе форма регистрации — бесплатный способ насоздавать аккаунтов и
+  // заодно разослать наши приветственные письма по чужим адресам.
+  const signupLimit = await hitRateLimit(
+    sql,
+    'register:ip',
+    clientIp(req),
+    REGISTER_MAX_PER_IP,
+    SIGNUP_WINDOW_SEC,
+  )
+  if (!signupLimit.allowed) {
+    return tooManyRequests(res, signupLimit, 'Слишком много регистраций подряд. Попробуйте позже.')
+  }
+
   const exists = await sql`SELECT id FROM users WHERE email = ${email} LIMIT 1`
   if (exists[0]) {
     return res.status(409).json({ message: 'Аккаунт с таким e-mail уже существует — войдите.' })
@@ -815,6 +925,21 @@ async function recoverPassword(req: VercelRequest, res: VercelResponse) {
 
   const sql = getSql()
   await ensureSchema(sql)
+
+  // Лимит на аккаунт уже есть ниже, но он не мешает перебирать чужие адреса
+  // подряд с одной машины: так форма превращается в рассыльщик писем от имени
+  // академии. Поэтому ограничиваем ещё и по источнику запроса.
+  const byIp = await hitRateLimit(
+    sql,
+    'recover:ip',
+    clientIp(req),
+    RECOVER_MAX_PER_IP,
+    SIGNUP_WINDOW_SEC,
+  )
+  if (!byIp.allowed) {
+    return tooManyRequests(res, byIp, 'Слишком много запросов восстановления. Попробуйте позже.')
+  }
+
   const rows = await sql`SELECT id, name, email FROM users WHERE email = ${normalized} LIMIT 1`
   const user = rows[0]
 
@@ -1293,6 +1418,26 @@ async function createApplication(req: VercelRequest, res: VercelResponse) {
   }
   if (!programId) {
     return res.status(400).json({ message: 'Не указана программа.' })
+  }
+
+  // Форма публичная по определению, поэтому без лимита её можно залить
+  // мусорными заявками — а это таблица с персональными данными, которую потом
+  // разбирает приёмная комиссия.
+  const sql = getSql()
+  await ensureSchema(sql)
+  const limit = await hitRateLimit(
+    sql,
+    'application:ip',
+    clientIp(req),
+    APPLICATION_MAX_PER_IP,
+    SIGNUP_WINDOW_SEC,
+  )
+  if (!limit.allowed) {
+    return tooManyRequests(
+      res,
+      limit,
+      'Заявка уже отправлена. Если нужно подать ещё одну, попробуйте позже или напишите в приёмную комиссию.',
+    )
   }
 
   const session = verifyToken(bearer(req))
