@@ -81,6 +81,31 @@ export interface CourseModule {
   lessons: Lesson[]
 }
 
+/** Снимок модели данных SCORM: «ключ cmi.* → значение». */
+export type ScormCmi = Record<string, string>
+
+/**
+ * Персональный прогресс слушателя по одному уроку.
+ *
+ * Хранится на сервере (таблица lesson_progress), поэтому обучение продолжается
+ * с того же места на любом устройстве, а прогресс одного слушателя не виден
+ * остальным.
+ */
+export interface LessonProgress {
+  courseId: string
+  lessonId: string
+  /** cmi.core.lesson_status / cmi.completion_status пакета. */
+  status: string
+  /** cmi.core.score.raw, если пакет выставляет баллы. */
+  score?: number
+  /** Доля пройденного, 0–100. */
+  progress: number
+  completed: boolean
+  /** Полное состояние SCORM для возобновления (включая cmi.suspend_data). */
+  cmi: ScormCmi
+  updatedAt: string
+}
+
 export interface Course {
   id: string
   title: string
@@ -94,7 +119,12 @@ export interface Course {
   durationHours: number
   lessonsCount: number
   price: number
-  /** Прогресс в процентах (0–100) */
+  /**
+   * Устаревшее поле: прогресс в процентах (0–100), общий для всех.
+   *
+   * Прогресс персональный и живёт в LessonProgress — интерфейс читает только
+   * его. Поле оставлено, чтобы не ломать уже сохранённые в БД карточки программ.
+   */
   progress: number
   modules: CourseModule[]
   /** id связанного опросника, если есть */

@@ -9,6 +9,7 @@ import { api } from '@/api'
 import { useAsync } from '@/hooks/useAsync'
 import { useCourses } from '@/context/CoursesContext'
 import { usePurchases } from '@/context/PurchaseContext'
+import { useProgress } from '@/context/ProgressContext'
 import { useNotifications } from '@/context/NotificationsContext'
 import { useAuth } from '@/context/AuthContext'
 import { formatDateTime } from '@/lib/utils'
@@ -25,6 +26,7 @@ export default function DashboardPage() {
   const { user, isAdmin } = useAuth()
   const { courses } = useCourses()
   const { canAccessCourse } = usePurchases()
+  const { getCourseProgress } = useProgress()
   const { items } = useNotifications()
   const { data: eventsData } = useAsync(() => api.events.list(), [])
 
@@ -33,7 +35,7 @@ export default function DashboardPage() {
 
   const myCourses = courses.filter((c) => canAccessCourse(c))
   const overall = myCourses.length
-    ? Math.round(myCourses.reduce((sum, c) => sum + c.progress, 0) / myCourses.length)
+    ? Math.round(myCourses.reduce((sum, c) => sum + getCourseProgress(c), 0) / myCourses.length)
     : 0
 
   const upcoming = [...(eventsData ?? [])]
@@ -144,7 +146,7 @@ export default function DashboardPage() {
                         Открыть
                       </Button>
                     </div>
-                    <ProgressBar value={course.progress} showLabel className="mt-4" />
+                    <ProgressBar value={getCourseProgress(course)} showLabel className="mt-4" />
                   </CardBody>
                 </Card>
               ))

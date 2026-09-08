@@ -7,6 +7,7 @@ import { Badge } from './ui/Badge'
 import { courseFormatLabel } from '@/lib/labels'
 import { formatPrice, formatDuration, displayTitle, isFree, cn } from '@/lib/utils'
 import { useCourses } from '@/context/CoursesContext'
+import { useProgress } from '@/context/ProgressContext'
 
 interface CourseCardProps {
   course: Course
@@ -61,6 +62,10 @@ function CourseCover({ course }: { course: Course }) {
 
 /** Карточка курса для каталога и дашборда. */
 export function CourseCard({ course, owned }: CourseCardProps) {
+  // Прогресс персональный: он приходит из записей слушателя, а не из карточки
+  // программы — та одна на всех.
+  const percent = useProgress().getCourseProgress(course)
+
   return (
     <article className="group flex flex-col rounded-card border border-ink-10 bg-wisdom transition-colors duration-200 hover:border-ink-40">
       <CourseCover course={course} />
@@ -82,9 +87,9 @@ export function CourseCard({ course, owned }: CourseCardProps) {
 
         {owned ? (
           <div className="space-y-4">
-            <ProgressBar value={course.progress} showLabel />
+            <ProgressBar value={percent} showLabel />
             <Button to={`/courses/${course.id}`} variant="secondary" size="sm" fullWidth>
-              {course.progress > 0 ? 'Продолжить' : 'Начать обучение'}
+              {percent > 0 ? 'Продолжить' : 'Начать обучение'}
               <ArrowRight width={16} height={16} />
             </Button>
           </div>
