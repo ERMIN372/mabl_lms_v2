@@ -5,7 +5,7 @@ import { ensureSchema, initDatabase } from './_seed.js'
 import { findDemoRows, purgeDemoRows } from './_demo.js'
 import { syncTelegramNews } from './_telegram.js'
 import { isYooKassaConfigured, createPayment, getPayment } from './_yookassa.js'
-import { signToken, requireAdmin, verifyToken, bearer } from './_auth.js'
+import { signToken, renewToken, requireAdmin, verifyToken, bearer } from './_auth.js'
 import { handleUpload, handleUploadPresigned } from '@vercel/blob/client'
 import { list as blobList, del as blobDel, issueSignedToken, presignUrl } from '@vercel/blob'
 import type {
@@ -106,9 +106,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ---------- ДОСТУП ПОЛЬЗОВАТЕЛЯ ----------
+    // Состояние сессии: жив ли токен и за каким аккаунтом он закреплён.
+    if (path === 'me/session' && method === 'GET') {
+      return await currentSession(req, res)
+    }
     // Программы, открытые текущему пользователю: только по оплаченным заказам.
     if (path === 'me/courses' && method === 'GET') {
-      return res.json({ courseIds: await listAccessibleCourseIds(req) })
+      return await accessibleCourses(req, res)
     }
 
     // ---------- COURSES (БД) ----------
@@ -912,18 +916,78 @@ async function createApplication(req: VercelRequest, res: VercelResponse) {
 // ---------------- доступ к программам ----------------
 
 /**
- * Программы, открытые пользователю: только оплаченные заказы (status = paid),
- * привязанные к id из токена сессии. Без токена доступа нет — гость видит
- * только описание программы.
+ * GET /api/me/session — проверка сессии.
+ *
+ * Профиль в браузере живёт бессрочно, а токен — нет. Раньше протухший токен
+ * никак себя не проявлял: человек оставался «залогинен», но сервер его не
+ * узнавал, и список оплаченных программ приходил пустым — со стороны это
+ * выглядело как самопроизвольный сброс доступа. Теперь клиент может спросить,
+ * жива ли сессия, и получить честный 401 либо продлённый токен.
  */
-async function listAccessibleCourseIds(req: VercelRequest): Promise<string[]> {
+async function currentSession(req: VercelRequest, res: VercelResponse) {
   const session = verifyToken(bearer(req))
-  if (!session) return []
+  if (!session) {
+    return res.status(401).json({ message: 'Сессия истекла. Войдите в личный кабинет заново.' })
+  }
   const sql = getSql()
   await ensureSchema(sql)
   const rows = await sql`
-    SELECT data->>'courseId' AS course_id FROM orders
-    WHERE data->>'userId' = ${session.id} AND data->>'status' = 'paid'
+    SELECT id, name, email, role, kind FROM users WHERE id = ${session.id} LIMIT 1
+  `
+  if (!rows[0]) {
+    return res.status(401).json({ message: 'Аккаунт не найден. Войдите в личный кабинет заново.' })
+  }
+  const u = rows[0]
+  const renewed = renewToken(session)
+  return res.json({
+    user: { id: u.id, name: u.name, email: u.email, role: u.role, kind: u.kind },
+    ...(renewed ? { token: renewed } : {}),
+  })
+}
+
+/**
+ * GET /api/me/courses — программы, открытые текущему пользователю.
+ *
+ * Без действующего токена отвечаем 401, а не пустым списком: пустой список
+ * клиент не отличал от «доступ отозван» и молча закрывал оплаченные программы.
+ */
+async function accessibleCourses(req: VercelRequest, res: VercelResponse) {
+  const session = verifyToken(bearer(req))
+  if (!session) {
+    return res.status(401).json({ message: 'Сессия истекла. Войдите в личный кабинет заново.' })
+  }
+  return res.json({ courseIds: await listAccessibleCourseIds(session.id) })
+}
+
+/**
+ * Программы, открытые пользователю: только оплаченные заказы (status = paid).
+ *
+ * Заказ ищем не только по userId из токена. Администратор оформляет доступ на
+ * запись из раздела «Участники», а она не всегда совпадает с аккаунтом: карточку
+ * могли завести руками до регистрации слушателя, и тогда у оплаченного заказа
+ * стоит id карточки, а у вошедшего человека — id его аккаунта. Поэтому вторым
+ * ключом идёт e-mail аккаунта: по нему подхватываются заказы, выписанные на
+ * карточку участника или оформленные на тот же адрес при онлайн-оплате.
+ */
+async function listAccessibleCourseIds(userId: string): Promise<string[]> {
+  const sql = getSql()
+  await ensureSchema(sql)
+  const accounts = await sql`SELECT email FROM users WHERE id = ${userId} LIMIT 1`
+  const email = String(accounts[0]?.email ?? '').trim().toLowerCase()
+  // Флагом отключаем поиск по адресу, если e-mail аккаунта почему-то пуст, —
+  // так запрос остаётся один и не находит лишнего.
+  const hasEmail = email !== ''
+  const rows = await sql`
+    SELECT o.data->>'courseId' AS course_id
+    FROM orders o
+    WHERE o.data->>'status' = 'paid'
+      AND (
+        o.data->>'userId' = ${userId}
+        OR (${hasEmail}::boolean AND lower(o.data->>'email') = ${email})
+        OR (${hasEmail}::boolean AND o.data->>'userId' IN (
+          SELECT p.id FROM participants p WHERE lower(p.data->>'email') = ${email}
+        ))
+      )
   `
   const ids = rows.map((r) => r.course_id as string).filter(Boolean)
   return Array.from(new Set(ids))
@@ -960,6 +1024,16 @@ async function createCoursePayment(req: VercelRequest, res: VercelResponse) {
   if (!course) return res.status(404).json({ message: 'Программа не найдена' })
   if (!course.price || course.price <= 0) {
     return res.status(400).json({ message: 'У программы не задана цена.' })
+  }
+
+  // Защита от повторной оплаты: если по программе уже есть оплаченный заказ,
+  // второй платёж не создаём. Пока доступ мог «пропадать» из-за протухшей
+  // сессии, слушатели покупали один и тот же курс дважды.
+  const already = await listAccessibleCourseIds(userId)
+  if (already.includes(course.id)) {
+    return res.status(409).json({
+      message: 'Программа уже оплачена — доступ открыт в личном кабинете.',
+    })
   }
 
   const sql = getSql()

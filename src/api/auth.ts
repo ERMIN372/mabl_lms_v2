@@ -28,6 +28,18 @@ export const authApi = {
     return user
   },
 
+  /**
+   * Проверка сессии на сервере. Возвращает актуальный профиль или бросает
+   * ApiError со статусом 401, если токен протух либо аккаунт удалён. Если
+   * сервер прислал продлённый токен — сохраняем его: активная работа в кабинете
+   * продлевает сессию, и она не рвётся посреди обучения.
+   */
+  async session(): Promise<User> {
+    const res = await http<{ user: User; token?: string }>('/me/session')
+    if (res.token) setToken(res.token)
+    return res.user
+  },
+
   async recover(email: string): Promise<string> {
     return http<{ message: string }>('/auth/recover', {
       method: 'POST',

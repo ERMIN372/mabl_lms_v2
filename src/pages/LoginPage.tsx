@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AuthContext'
 
 export default function LoginPage() {
-  const { login, register, recover } = useAuth()
+  const { login, register, recover, sessionExpired } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string })?.from || '/dashboard'
@@ -133,6 +133,13 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
               />
+
+              {sessionExpired && !error && (
+                <div className="rounded-token border border-ink-20 bg-ink-5 px-4 py-3 text-sm text-neft">
+                  Срок сессии истёк — войдите заново. Оплаченные программы никуда не делись:
+                  доступ вернётся сразу после входа.
+                </div>
+              )}
 
               {error && (
                 <div className="rounded-token border border-ocean/40 bg-oceanc-10 px-4 py-3 text-sm text-ocean">

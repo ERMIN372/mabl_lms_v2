@@ -20,7 +20,7 @@ export default function CheckoutPage() {
   const returnOrderId = params.get('order') || ''
   const { getCourseById } = useCourses()
   const course = getCourseById(courseId)
-  const { canAccessCourse, refreshAccess } = usePurchases()
+  const { canAccessCourse, refreshAccess, accessStale } = usePurchases()
   const { user, isAuthenticated } = useAuth()
 
   const [email, setEmail] = useState(user?.email || '')
@@ -177,6 +177,21 @@ export default function CheckoutPage() {
             Оплата проходит на защищённой странице ЮKassa. После подтверждения платежа доступ
             к программе откроется в вашем личном кабинете автоматически.
           </p>
+
+          {accessStale && (
+            <div className="mt-6 rounded-token border border-ink-20 bg-ink-5 px-4 py-3 text-sm text-neft">
+              Доступ к программам сейчас не проверяется — связь с сервером сорвалась. Если вы уже
+              оплачивали этот курс, не платите повторно:
+              <button
+                type="button"
+                onClick={() => void refreshAccess()}
+                className="ml-1 text-ocean underline underline-offset-4"
+              >
+                проверьте доступ ещё раз
+              </button>
+              .
+            </div>
+          )}
 
           <form onSubmit={submit} className="mt-8 space-y-5">
             <Input
