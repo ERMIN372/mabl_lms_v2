@@ -10,6 +10,7 @@ export const courseFormatLabel: Record<CourseFormat, string> = {
   scorm: 'Тренинг',
   video: 'Видео',
   longread: 'Лонгрид',
+  course: 'Курс',
 }
 
 export const notificationKindLabel: Record<NotificationKind, string> = {

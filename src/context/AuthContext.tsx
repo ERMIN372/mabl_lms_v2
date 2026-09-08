@@ -29,6 +29,7 @@ function normalizeUser(raw: unknown): User | null {
     email: u.email,
     role: u.role ?? 'Слушатель академии',
     kind: u.kind === 'admin' ? 'admin' : 'student',
+    emailVerified: Boolean(u.emailVerified),
   }
 }
 
@@ -41,9 +42,19 @@ interface AuthContextValue {
   /** Сессия была сброшена сервером — нужен повторный вход. */
   sessionExpired: boolean
   login: (email: string, password: string) => Promise<User>
-  register: (input: { name: string; email: string; password: string }) => Promise<User>
+  register: (input: {
+    name: string
+    email: string
+    password: string
+  }) => Promise<{ user: User; codeError?: string }>
   logout: () => void
   recover: (email: string) => Promise<string>
+  /** Задать новый пароль по ссылке из письма: сервер сразу открывает сессию. */
+  resetPassword: (token: string, password: string) => Promise<User>
+  /** Подтвердить e-mail кодом из письма. */
+  verifyEmail: (code: string) => Promise<void>
+  /** Выслать код подтверждения повторно. */
+  resendCode: () => Promise<string>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -73,34 +84,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     else localStorage.removeItem(STORAGE_KEY)
   }, [user])
 
-  // Сверка восстановленной сессии с сервером — один раз при запуске приложения.
+  // Сессия, начатая до появления cookie, живёт только в localStorage. Раздача
+  // материалов SCORM читает именно cookie, поэтому подтверждаем сессию серверу
+  // при загрузке приложения — иначе у давно вошедших курсы «не открываются».
   useEffect(() => {
-    if (!restoring) return
-    let active = true
-    api.auth
-      .session()
-      .then((account) => {
-        if (active) setUser(account)
-      })
-      .catch((err) => {
-        if (!active) return
-        // 401 — токена нет или он протух: сбрасываем вход осознанно.
-        // Любая другая ошибка (сеть, холодный старт БД) сессию не трогает.
-        if (err instanceof ApiError && err.status === 401) {
-          api.auth.logout()
-          setUser(null)
-          setSessionExpired(true)
-        }
-      })
-      .finally(() => {
-        if (active) setRestoring(false)
-      })
-    return () => {
-      active = false
-    }
-    // Проверка выполняется один раз: дальше состояние ведут login/logout.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    if (user) void api.auth.syncSession()
+  }, [user])
 
   const login = async (email: string, password: string) => {
     const account = await api.auth.login(email, password)
@@ -110,19 +99,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const register = async (input: { name: string; email: string; password: string }) => {
-    const account = await api.auth.register(input)
-    setSessionExpired(false)
-    setUser(account)
-    return account
+    const result = await api.auth.register(input)
+    setUser(result.user)
+    return result
   }
 
   const logout = () => {
-    api.auth.logout()
-    setSessionExpired(false)
+    void api.auth.logout()
     setUser(null)
   }
 
   const recover = (email: string) => api.auth.recover(email)
+
+  const resetPassword = async (token: string, password: string) => {
+    const account = await api.auth.reset(token, password)
+    setUser(account)
+    return account
+  }
+
+  const verifyEmail = async (code: string) => {
+    await api.auth.verifyEmail(code)
+    setUser((prev) => (prev ? { ...prev, emailVerified: true } : prev))
+  }
+
+  const resendCode = () => api.auth.resendCode()
+
+  // Признак подтверждённой почты меняется на сервере (подтверждение с другого
+  // устройства, переход по ссылке сброса), а копия профиля лежит в браузере —
+  // поэтому при загрузке приложения перечитываем профиль.
+  useEffect(() => {
+    if (!user || user.emailVerified) return
+    let active = true
+    void api.auth
+      .me()
+      .then((fresh) => active && setUser((prev) => (prev ? { ...prev, ...fresh } : prev)))
+      .catch(() => {
+        /* сессия истекла — вход попросят при следующем действии */
+      })
+    return () => {
+      active = false
+    }
+    // Достаточно одной сверки на вход в приложение.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id])
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -135,6 +154,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       register,
       logout,
       recover,
+      resetPassword,
+      verifyEmail,
+      resendCode,
     }),
     [user, restoring, sessionExpired],
   )

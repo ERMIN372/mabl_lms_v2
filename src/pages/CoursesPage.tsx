@@ -5,7 +5,7 @@ import { useCourses } from '@/context/CoursesContext'
 import { usePurchases } from '@/context/PurchaseContext'
 import { cn } from '@/lib/utils'
 
-type FilterKey = 'all' | 'owned' | 'available' | 'scorm' | 'video' | 'longread'
+type FilterKey = 'all' | 'owned' | 'available' | 'scorm' | 'video' | 'longread' | 'course'
 
 const filters: { key: FilterKey; label: string }[] = [
   { key: 'all', label: 'Все' },
@@ -14,6 +14,7 @@ const filters: { key: FilterKey; label: string }[] = [
   { key: 'scorm', label: 'SCORM' },
   { key: 'video', label: 'Видео' },
   { key: 'longread', label: 'Лонгриды' },
+  { key: 'course', label: 'Курсы' },
 ]
 
 export default function CoursesPage() {
@@ -31,6 +32,7 @@ export default function CoursesPage() {
         case 'scorm':
         case 'video':
         case 'longread':
+        case 'course':
           return c.format === active
         default:
           return true
