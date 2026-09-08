@@ -1,13 +1,19 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { User } from '@/types'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 
 /**
  * Сессия пользователя. Учётные данные проверяет слой данных (`api.auth`),
  * а здесь хранится только состояние сессии (в localStorage, чтобы вход
- * сохранялся между перезагрузками). При переходе на реальный бэкенд логика
- * входа меняется в `src/api/auth.ts`, контекст и UI остаются прежними.
+ * сохранялся между перезагрузками).
+ *
+ * Профиль в localStorage и токен сессии живут порознь, и раньше профиль
+ * переживал токен: человек видел себя залогиненным, а сервер его уже не
+ * узнавал — оплаченные программы «закрывались» сами собой. Поэтому при загрузке
+ * восстановленный профиль сверяется с сервером (`/api/me/session`): сессия
+ * продлевается, а если она мертва — вход честно сбрасывается с понятным
+ * сообщением вместо тихой потери доступа.
  */
 
 const STORAGE_KEY = 'mabl.auth.user'
@@ -31,6 +37,10 @@ interface AuthContextValue {
   user: User | null
   isAuthenticated: boolean
   isAdmin: boolean
+  /** Проверяется ли сохранённая сессия на сервере (первые мгновения загрузки). */
+  restoring: boolean
+  /** Сессия была сброшена сервером — нужен повторный вход. */
+  sessionExpired: boolean
   login: (email: string, password: string) => Promise<User>
   register: (input: {
     name: string
@@ -59,6 +69,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   })
 
+  const [sessionExpired, setSessionExpired] = useState(false)
+  // Проверяем сохранённый профиль только если он вообще есть.
+  const [restoring, setRestoring] = useState(() => {
+    try {
+      return Boolean(localStorage.getItem(STORAGE_KEY))
+    } catch {
+      return false
+    }
+  })
+
   useEffect(() => {
     if (user) localStorage.setItem(STORAGE_KEY, JSON.stringify(user))
     else localStorage.removeItem(STORAGE_KEY)
@@ -73,6 +93,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string) => {
     const account = await api.auth.login(email, password)
+    setSessionExpired(false)
     setUser(account)
     return account
   }
@@ -127,6 +148,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       isAuthenticated: Boolean(user),
       isAdmin: user?.kind === 'admin',
+      restoring,
+      sessionExpired,
       login,
       register,
       logout,
@@ -135,7 +158,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       verifyEmail,
       resendCode,
     }),
-    [user],
+    [user, restoring, sessionExpired],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

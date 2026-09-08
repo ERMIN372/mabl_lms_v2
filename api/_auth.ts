@@ -76,8 +76,24 @@ export function authSecretProblem(): string | null {
   )
 }
 
-/** Время жизни токена — 7 суток. */
-const TTL_MS = 1000 * 60 * 60 * 24 * 7
+// Если AUTH_SECRET не задан, подпись держится на строке подключения к БД. Любая
+// её смена (ротация пароля Neon, переход с pooled на direct, разные значения в
+// prod и preview) мгновенно делает недействительными ВСЕ выданные токены: люди
+// остаются «залогинены» в браузере, но сервер их больше не узнаёт и доступ к
+// оплаченным программам пропадает. Предупреждаем об этом в логах.
+if (!process.env.AUTH_SECRET) {
+  console.warn(
+    '[auth] AUTH_SECRET не задан: подпись токенов выводится из строки подключения к БД. ' +
+      'При её смене все сессии слетают, а доступ к оплаченным программам «обнуляется». ' +
+      'Задайте AUTH_SECRET в переменных окружения.',
+  )
+}
+
+/** Время жизни токена — 30 суток (продлевается на каждом запросе к /api/me/*). */
+export const TTL_MS = 1000 * 60 * 60 * 24 * 30
+
+/** Порог продления: токен переподписывается, когда истекла половина срока. */
+const RENEW_AFTER_MS = TTL_MS / 2
 
 /**
  * Имя cookie с тем же токеном сессии.
@@ -134,10 +150,21 @@ export function verifyToken(token: string | undefined): TokenPayload | null {
     }
     if (typeof body.exp !== 'number' || body.exp < Date.now()) return null
     if (!body.id || !body.kind) return null
-    return { id: body.id, kind: body.kind }
+    return { id: body.id, kind: body.kind, exp: body.exp }
   } catch {
     return null
   }
+}
+
+/**
+ * Скользящее продление сессии: если до конца срока осталось меньше половины
+ * TTL, выдаём свежий токен. Возвращает null, когда продлевать нечего, — чтобы
+ * активные слушатели не разлогинивались посреди обучения.
+ */
+export function renewToken(session: VerifiedToken): string | null {
+  const remaining = session.exp - Date.now()
+  if (remaining > RENEW_AFTER_MS) return null
+  return signToken({ id: session.id, kind: session.kind })
 }
 
 /** Достать Bearer-токен из заголовка Authorization. */

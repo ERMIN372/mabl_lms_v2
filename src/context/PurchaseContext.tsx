@@ -1,6 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 import { useAuth } from '@/context/AuthContext'
 import { isFree } from '@/lib/utils'
 import type { Course } from '@/types'
@@ -12,6 +12,11 @@ import type { Course } from '@/types'
  * только к тем программам, по которым в БД есть оплаченный заказ
  * (GET /api/me/courses). Локально доступ не выдаётся и не хранится — гость
  * видит только описание программы.
+ *
+ * Сбой запроса доступ НЕ закрывает. Раньше любая ошибка (холодный старт базы,
+ * обрыв сети, 500 на деплое) молча превращалась в пустой список, и оплаченная
+ * программа выглядела недоступной. Теперь список отзывается только по явному
+ * 401 — когда сервер сказал, что сессии нет.
  */
 
 const EVENTS_KEY = 'mabl.registered.events'
@@ -21,6 +26,11 @@ interface PurchaseContextValue {
   registeredEventIds: string[]
   /** Загружается ли список доступных программ. */
   loading: boolean
+  /**
+   * Список доступов не удалось обновить (сеть или сервер), показан прошлый.
+   * UI может предупредить, что данные могут быть неактуальны.
+   */
+  accessStale: boolean
   isOwned: (courseId: string) => boolean
   /**
    * Открыты ли материалы программы: нужен вход, плюс оплаченный заказ
@@ -51,34 +61,49 @@ function loadEvents(key: string): string[] {
 }
 
 export function PurchaseProvider({ children }: { children: ReactNode }) {
-  const { user } = useAuth()
+  const { user, restoring } = useAuth()
   const userId = user?.id
   const [ownedCourseIds, setOwned] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
+  const [accessStale, setAccessStale] = useState(false)
   const [registeredEventIds, setRegistered] = useState<string[]>(() => loadEvents(eventsKey(undefined)))
+  // Последний известный список — чтобы вернуть его, если обновление сорвалось.
+  const ownedRef = useRef<string[]>([])
+  ownedRef.current = ownedCourseIds
 
   const refreshAccess = useCallback(async (): Promise<string[]> => {
     if (!userId) {
       setOwned([])
+      setAccessStale(false)
       return []
     }
     setLoading(true)
     try {
       const ids = await api.courses.myAccess()
       setOwned(ids)
+      setAccessStale(false)
       return ids
-    } catch {
-      setOwned([])
-      return []
+    } catch (err) {
+      // 401 — сессии нет: доступ закрыт до повторного входа, это не сбой.
+      if (err instanceof ApiError && err.status === 401) {
+        setOwned([])
+        setAccessStale(false)
+        return []
+      }
+      // Всё остальное — временная неполадка. Прошлый список сохраняем.
+      setAccessStale(true)
+      return ownedRef.current
     } finally {
       setLoading(false)
     }
   }, [userId])
 
-  // Список доступных программ перезагружается при входе и выходе.
+  // Список доступных программ перезагружается при входе и выходе. Пока сессия
+  // сверяется с сервером, запрос не шлём — иначе он уйдёт со старым токеном.
   useEffect(() => {
+    if (restoring) return
     void refreshAccess()
-  }, [refreshAccess])
+  }, [refreshAccess, restoring])
 
   // Записи на события — локальные и привязаны к пользователю.
   useEffect(() => {
@@ -98,6 +123,7 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
       ownedCourseIds,
       registeredEventIds,
       loading,
+      accessStale,
       isOwned: (id) => ownedCourseIds.includes(id),
       canAccessCourse: (course) =>
         Boolean(userId) && (isFree(course.price) || ownedCourseIds.includes(course.id)),
@@ -105,7 +131,7 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
       refreshAccess,
       registerEvent,
     }),
-    [ownedCourseIds, registeredEventIds, loading, refreshAccess, userId],
+    [ownedCourseIds, registeredEventIds, loading, accessStale, refreshAccess, userId],
   )
 
   return <PurchaseContext.Provider value={value}>{children}</PurchaseContext.Provider>

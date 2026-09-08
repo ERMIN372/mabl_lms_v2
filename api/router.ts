@@ -238,9 +238,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ---------- ДОСТУП ПОЛЬЗОВАТЕЛЯ ----------
+    // Состояние сессии: жив ли токен и за каким аккаунтом он закреплён.
+    if (path === 'me/session' && method === 'GET') {
+      return await currentSession(req, res)
+    }
     // Программы, открытые текущему пользователю: только по оплаченным заказам.
     if (path === 'me/courses' && method === 'GET') {
-      return res.json({ courseIds: await listAccessibleCourseIds(req) })
+      return await accessibleCourses(req, res)
     }
 
     // ---------- COURSES (БД) ----------
@@ -1467,9 +1471,13 @@ async function createApplication(req: VercelRequest, res: VercelResponse) {
 // ---------------- доступ к программам ----------------
 
 /**
- * Программы, открытые пользователю: только оплаченные заказы (status = paid),
- * привязанные к id из токена сессии. Без токена доступа нет — гость видит
- * только описание программы.
+ * GET /api/me/session — проверка сессии.
+ *
+ * Профиль в браузере живёт бессрочно, а токен — нет. Раньше протухший токен
+ * никак себя не проявлял: человек оставался «залогинен», но сервер его не
+ * узнавал, и список оплаченных программ приходил пустым — со стороны это
+ * выглядело как самопроизвольный сброс доступа. Теперь клиент может спросить,
+ * жива ли сессия, и получить честный 401 либо продлённый токен.
  */
 async function listAccessibleCourseIds(req: VercelRequest): Promise<string[]> {
   const account = verifyToken(bearer(req))
@@ -1701,6 +1709,16 @@ async function createCoursePayment(req: VercelRequest, res: VercelResponse) {
   if (!course) return res.status(404).json({ message: 'Программа не найдена' })
   if (!course.price || course.price <= 0) {
     return res.status(400).json({ message: 'У программы не задана цена.' })
+  }
+
+  // Защита от повторной оплаты: если по программе уже есть оплаченный заказ,
+  // второй платёж не создаём. Пока доступ мог «пропадать» из-за протухшей
+  // сессии, слушатели покупали один и тот же курс дважды.
+  const already = await listAccessibleCourseIds(userId)
+  if (already.includes(course.id)) {
+    return res.status(409).json({
+      message: 'Программа уже оплачена — доступ открыт в личном кабинете.',
+    })
   }
 
   const sql = getSql()

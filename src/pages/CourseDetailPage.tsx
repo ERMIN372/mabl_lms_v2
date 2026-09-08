@@ -96,7 +96,7 @@ export default function CourseDetailPage() {
   const { id = '' } = useParams()
   const { getCourseById, updateCourse } = useCourses()
   const course = getCourseById(id)
-  const { canAccessCourse } = usePurchases()
+  const { canAccessCourse, accessStale, refreshAccess, loading: accessLoading } = usePurchases()
   const { user, isAuthenticated } = useAuth()
   // Материалы программы открываются только авторизованному слушателю с
   // оплаченным заказом (бесплатные программы — сразу после входа). Гость видит
@@ -291,6 +291,20 @@ export default function CourseDetailPage() {
                   </>
                 ) : (
                   <>
+                    {isAuthenticated && accessStale && (
+                      <div className="mb-6 rounded-token border border-ink-20 bg-ink-5 px-4 py-3 text-sm text-neft">
+                        Не удалось проверить доступ к программе — похоже, связь с сервером. Если
+                        программа уже оплачена, не платите второй раз: обновите проверку.
+                        <button
+                          type="button"
+                          onClick={() => void refreshAccess()}
+                          disabled={accessLoading}
+                          className="mt-3 block text-sm text-ocean underline underline-offset-4 disabled:opacity-60"
+                        >
+                          {accessLoading ? 'Проверяем…' : 'Проверить доступ ещё раз'}
+                        </button>
+                      </div>
+                    )}
                     <p className="eyebrow mb-2">Стоимость</p>
                     <p className="font-serif text-4xl font-light text-neft">{formatPrice(course.price)}</p>
                     <p className="mt-2 text-sm text-ink-60">
