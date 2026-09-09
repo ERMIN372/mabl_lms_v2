@@ -41,7 +41,10 @@ function LessonPlayer({
       </div>
     )
   }
-  if (lesson.format === 'scorm') {
+  // Тренинг и курс ведут себя одинаково: если к уроку приложен SCORM-пакет —
+  // проигрываем его. Без этой ветки урок формата «Курс» проваливался бы в
+  // ветку лонгрида и подписывался как «Лонгрид».
+  if (lesson.format === 'scorm' || lesson.format === 'course') {
     if (lesson.launchUrl) {
       return (
         <ScormPlayer
@@ -61,9 +64,11 @@ function LessonPlayer({
         <span className="flex h-16 w-16 items-center justify-center rounded-card border border-ink-20 text-ocean">
           <Clipboard width={26} height={26} />
         </span>
-        <p className="mt-4 text-sm uppercase tracking-wide text-ink-60">Интерактивный тренинг · {lesson.duration}</p>
+        <p className="mt-4 text-sm uppercase tracking-wide text-ink-60">
+          {courseFormatLabel[lesson.format]} · {lesson.duration}
+        </p>
         <p className="mt-1 max-w-xs text-xs text-ink-40">
-          Материалы тренинга появятся здесь после публикации.
+          Материалы появятся здесь после публикации.
         </p>
       </div>
     )
@@ -91,7 +96,7 @@ export default function CourseDetailPage() {
   const { id = '' } = useParams()
   const { getCourseById, updateCourse } = useCourses()
   const course = getCourseById(id)
-  const { canAccessCourse } = usePurchases()
+  const { canAccessCourse, accessStale, refreshAccess, loading: accessLoading } = usePurchases()
   const { user, isAuthenticated } = useAuth()
   // Материалы программы открываются только авторизованному слушателю с
   // оплаченным заказом (бесплатные программы — сразу после входа). Гость видит
@@ -286,6 +291,20 @@ export default function CourseDetailPage() {
                   </>
                 ) : (
                   <>
+                    {isAuthenticated && accessStale && (
+                      <div className="mb-6 rounded-token border border-ink-20 bg-ink-5 px-4 py-3 text-sm text-neft">
+                        Не удалось проверить доступ к программе — похоже, связь с сервером. Если
+                        программа уже оплачена, не платите второй раз: обновите проверку.
+                        <button
+                          type="button"
+                          onClick={() => void refreshAccess()}
+                          disabled={accessLoading}
+                          className="mt-3 block text-sm text-ocean underline underline-offset-4 disabled:opacity-60"
+                        >
+                          {accessLoading ? 'Проверяем…' : 'Проверить доступ ещё раз'}
+                        </button>
+                      </div>
+                    )}
                     <p className="eyebrow mb-2">Стоимость</p>
                     <p className="font-serif text-4xl font-light text-neft">{formatPrice(course.price)}</p>
                     <p className="mt-2 text-sm text-ink-60">

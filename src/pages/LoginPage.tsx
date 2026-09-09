@@ -6,12 +6,15 @@ import { Crest } from '@/components/brand/Crest'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AuthContext'
+import { safeRedirectPath } from '@/lib/utils'
 
 export default function LoginPage() {
-  const { login, register, recover } = useAuth()
+  const { login, register, recover, sessionExpired } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const from = (location.state as { from?: string })?.from || '/dashboard'
+  // Адрес возврата приходит из location.pathname, то есть из адресной строки —
+  // пропускаем только собственные пути (см. safeRedirectPath).
+  const from = safeRedirectPath((location.state as { from?: string })?.from)
 
   const [mode, setMode] = useState<'login' | 'register' | 'recover'>('login')
   const [name, setName] = useState('')
@@ -44,8 +47,10 @@ export default function LoginPage() {
     setInfo('')
     setLoading(true)
     try {
-      await register({ name, email, password })
-      navigate(from, { replace: true })
+      const { codeError } = await register({ name, email, password })
+      // Аккаунт создан в любом случае; ведём на подтверждение почты и, если
+      // письмо не ушло, честно говорим об этом — там же можно повторить.
+      navigate('/verify-email', { replace: true, state: { from, codeError } })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать аккаунт')
     } finally {
@@ -133,6 +138,13 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
               />
+
+              {sessionExpired && !error && (
+                <div className="rounded-token border border-ink-20 bg-ink-5 px-4 py-3 text-sm text-neft">
+                  Срок сессии истёк — войдите заново. Оплаченные программы никуда не делись:
+                  доступ вернётся сразу после входа.
+                </div>
+              )}
 
               {error && (
                 <div className="rounded-token border border-ocean/40 bg-oceanc-10 px-4 py-3 text-sm text-ocean">

@@ -56,3 +56,25 @@ export function formatDuration(hours: number): string {
   return `${h} ч ${m} мин`
 }
 
+
+/**
+ * Безопасный адрес для перехода после входа.
+ *
+ * Куда вернуть пользователя, берётся из `location.pathname` — то есть из
+ * адресной строки, которой распоряжается тот, кто прислал ссылку. React Router
+ * 6 считает `//example.com` и `/\example.com` внешними адресами (CVE об открытом
+ * перенаправлении; исправление есть только в 7-й версии), поэтому ссылка вида
+ * `/\evil.example` уводила бы человека на чужой сайт сразу после входа — с
+ * готовой формой «повторите пароль».
+ *
+ * Пропускаем только собственные пути: одиночный ведущий слэш, без второго слэша
+ * и без обратной косой сразу за ним. Всё остальное — в личный кабинет.
+ */
+export function safeRedirectPath(value: unknown, fallback = '/dashboard'): string {
+  if (typeof value !== 'string' || !value) return fallback
+  if (!value.startsWith('/')) return fallback
+  if (value.startsWith('//') || value.startsWith('/\\')) return fallback
+  // Схемы вида `/javascript:...` роутер не выполнит, но и пропускать незачем.
+  if (/^\/\s*[a-z][a-z0-9+.-]*:/i.test(value)) return fallback
+  return value
+}

@@ -17,9 +17,16 @@ import pg from 'pg'
 /** Строка результата запроса. */
 export type SqlRow = Record<string, any>
 
-/** Тег-функция запроса: `` sql`SELECT * FROM t WHERE id = ${id}` ``. */
+/**
+ * Тег-функция запроса: `` sql`SELECT * FROM t WHERE id = ${id}` ``.
+ *
+ * Метод `query` — для запросов, которые нельзя выразить шаблоном (например,
+ * ALTER TABLE с именем колонки): текст передаётся строкой, значения — массивом
+ * параметров. Тот же интерфейс был у прежнего драйвера Neon.
+ */
 export interface Sql {
   (strings: TemplateStringsArray, ...values: unknown[]): Promise<SqlRow[]>
+  query(text: string, params?: unknown[]): Promise<SqlRow[]>
 }
 
 let pool: pg.Pool | undefined
@@ -82,14 +89,19 @@ export function getPool(): pg.Pool {
  */
 export function getSql(): Sql {
   const db = getPool()
-  return (strings: TemplateStringsArray, ...values: unknown[]) => {
+  const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     let text = ''
     strings.forEach((part, i) => {
       text += part
       if (i < values.length) text += `$${i + 1}`
     })
     return db.query(text, values).then((result) => result.rows as SqlRow[])
-  }
+  }) as Sql
+
+  sql.query = (text: string, params: unknown[] = []) =>
+    db.query(text, params).then((result) => result.rows as SqlRow[])
+
+  return sql
 }
 
 /** Закрыть пул (используется в скриптах и при остановке сервера). */
