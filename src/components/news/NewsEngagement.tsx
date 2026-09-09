@@ -24,7 +24,7 @@ export function NewsEngagement({ newsId }: { newsId: string }) {
   useEffect(() => {
     let active = true
     setLoading(true)
-    Promise.all([api.news.getReactions(newsId, user?.id), api.news.listComments(newsId)])
+    Promise.all([api.news.getReactions(newsId), api.news.listComments(newsId)])
       .then(([r, c]) => {
         if (!active) return
         setReactions(r)
@@ -40,7 +40,7 @@ export function NewsEngagement({ newsId }: { newsId: string }) {
   const onReact = async (emoji: string) => {
     if (!user) return
     try {
-      setReactions(await api.news.toggleReaction(newsId, emoji, user.id))
+      setReactions(await api.news.toggleReaction(newsId, emoji))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить реакцию.')
     }
@@ -53,11 +53,7 @@ export function NewsEngagement({ newsId }: { newsId: string }) {
     setBusy(true)
     setError(null)
     try {
-      const comment = await api.news.addComment(newsId, {
-        author: user.name || 'Участник',
-        body,
-        userId: user.id,
-      })
+      const comment = await api.news.addComment(newsId, { body })
       setComments((prev) => [...prev, comment])
       setText('')
     } catch (err) {
@@ -70,7 +66,7 @@ export function NewsEngagement({ newsId }: { newsId: string }) {
   const onDelete = async (comment: NewsComment) => {
     if (!window.confirm('Удалить комментарий?')) return
     try {
-      await api.news.removeComment(newsId, comment.id, user?.id)
+      await api.news.removeComment(newsId, comment.id)
       setComments((prev) => prev.filter((c) => c.id !== comment.id))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось удалить комментарий.')

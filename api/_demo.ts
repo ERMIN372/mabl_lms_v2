@@ -1,4 +1,4 @@
-import type { NeonQueryFunction } from '@neondatabase/serverless'
+import type { Sql } from './_db.js'
 
 /**
  * Разовая уборка демо-данных из БД.
@@ -13,7 +13,7 @@ import type { NeonQueryFunction } from '@neondatabase/serverless'
  * (`findDemoRows`) и лишь затем удалять (`purgeDemoRows`).
  */
 
-type Sql = NeonQueryFunction<false, false>
+
 
 /** id бывших демо-записей по таблицам. */
 const DEMO_IDS = {

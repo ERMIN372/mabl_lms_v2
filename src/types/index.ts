@@ -61,7 +61,7 @@ export interface Program {
   international?: string
 }
 
-export type CourseFormat = 'scorm' | 'video' | 'longread'
+export type CourseFormat = 'scorm' | 'video' | 'longread' | 'course'
 
 export type CourseLevel = 'Базовый' | 'Продвинутый' | 'Экспертный'
 
@@ -145,7 +145,7 @@ export interface Material {
   date: string
   courseId?: string
   body?: string[]
-  /** Адрес прикреплённого файла в хранилище (Vercel Blob). */
+  /** Адрес прикреплённого файла в хранилище: `/files/<ключ>`. */
   fileUrl?: string
   /** Тот же файл с принудительной отдачей на скачивание. */
   fileDownloadUrl?: string
@@ -237,6 +237,8 @@ export interface User {
   role: string
   /** Уровень доступа: администратор или слушатель. */
   kind: UserRole
+  /** Подтверждён ли адрес почты кодом из письма. */
+  emailVerified?: boolean
 }
 
 // Администрирование: участники и заказы
@@ -278,6 +280,8 @@ export interface Order {
   paymentId?: string
   /** Платёжный провайдер, через который оформлен заказ. */
   provider?: string
+  /** Когда ушло письмо об открытом доступе — чтобы не отправить его дважды. */
+  accessEmailSentAt?: string
 }
 
 export type ApplicationStatus = 'new' | 'processing' | 'enrolled' | 'declined'

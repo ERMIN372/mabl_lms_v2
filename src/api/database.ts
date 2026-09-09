@@ -51,6 +51,16 @@ export interface InitResult {
   adminPassword?: string
 }
 
+/** Диагностика отправки писем: чем отправляем и чего не хватает в окружении. */
+export interface MailStatus {
+  transport: 'smtp' | 'resend' | 'none'
+  from: string | null
+  host: string | null
+  port: number | null
+  configured: boolean
+  problems: string[]
+}
+
 export interface DbUserPatch {
   name?: string
   role?: string
@@ -65,6 +75,11 @@ export const databaseApi = {
 
   async init(): Promise<InitResult> {
     return http<InitResult>('/admin/db/init', { method: 'POST' })
+  },
+
+  /** Настройки отправки писем (без секретов): чем шлём и что не заполнено. */
+  async mailStatus(): Promise<MailStatus> {
+    return http<MailStatus>('/admin/mail')
   },
 
   /** Найти в БД остатки старых демо-данных (без удаления). */

@@ -8,7 +8,7 @@ import { courseFormatLabel } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import type { Course, CourseFormat, CourseLevel } from '@/types'
 
-const FORMATS: CourseFormat[] = ['video', 'longread', 'scorm']
+const FORMATS: CourseFormat[] = ['video', 'longread', 'scorm', 'course']
 const LEVELS: CourseLevel[] = ['Базовый', 'Продвинутый', 'Экспертный']
 
 // Базовая форма поля без ширины и горизонтальных отступов — их задаём по месту,
