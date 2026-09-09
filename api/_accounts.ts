@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import type { NeonQueryFunction } from '@neondatabase/serverless'
+import type { Sql } from './_db.js'
 import { courseAccessMessage, sendMail, verificationCodeMessage } from './_mail.js'
 
 /**
@@ -13,7 +13,6 @@ import { courseAccessMessage, sendMail, verificationCodeMessage } from './_mail.
  * таблицей password_resets и страницей /reset-password.
  */
 
-type Sql = NeonQueryFunction<false, false>
 
 /** Код подтверждения живёт 15 минут. */
 export const CODE_TTL_MIN = 15

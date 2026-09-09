@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import type { VercelRequest, VercelResponse } from '@vercel/node'
+import type { ApiRequest, ApiResponse } from './_http.js'
 
 /**
  * Простая аутентификация по подписанному токену (HMAC-SHA256), без внешних
@@ -115,6 +115,11 @@ export interface TokenPayload {
   kind: string
 }
 
+/** Проверенный токен: полезная нагрузка плюс момент истечения (мс эпохи). */
+export interface VerifiedToken extends TokenPayload {
+  exp: number
+}
+
 function hmac(input: string, key: string): string {
   return crypto.createHmac('sha256', key).update(input).digest('hex')
 }
@@ -132,7 +137,7 @@ export function signToken(payload: TokenPayload): string {
  * Проверить токен; вернуть полезную нагрузку или null.
  * Без секрета проверить подпись нечем — значит, никто не авторизован.
  */
-export function verifyToken(token: string | undefined): TokenPayload | null {
+export function verifyToken(token: string | undefined): VerifiedToken | null {
   if (!token) return null
   const key = secret()
   if (!key) return null
@@ -168,7 +173,7 @@ export function renewToken(session: VerifiedToken): string | null {
 }
 
 /** Достать Bearer-токен из заголовка Authorization. */
-export function bearer(req: VercelRequest): string | undefined {
+export function bearer(req: ApiRequest): string | undefined {
   const h = req.headers['authorization'] || req.headers['Authorization']
   const value = Array.isArray(h) ? h[0] : h
   if (typeof value === 'string' && value.startsWith('Bearer ')) return value.slice(7)
@@ -176,7 +181,7 @@ export function bearer(req: VercelRequest): string | undefined {
 }
 
 /** Достать токен сессии из cookie (используется раздачей файлов SCORM). */
-export function cookieToken(req: VercelRequest): string | undefined {
+export function cookieToken(req: ApiRequest): string | undefined {
   const raw = req.headers.cookie
   if (!raw) return undefined
   for (const part of raw.split(';')) {
@@ -201,7 +206,7 @@ export function cookieToken(req: VercelRequest): string | undefined {
  * cookie пользователя и получится CSRF. Сейчас единственный потребитель —
  * `serveScormFile`.
  */
-export function browserSession(req: VercelRequest): TokenPayload | null {
+export function browserSession(req: ApiRequest): VerifiedToken | null {
   return verifyToken(bearer(req)) ?? verifyToken(cookieToken(req))
 }
 
@@ -230,7 +235,7 @@ export function clearSessionCookie(): string {
  * Гард администратора: пропускает только запросы с валидным токеном роли admin.
  * При отказе сам отвечает 401 и возвращает false.
  */
-export function requireAdmin(req: VercelRequest, res: VercelResponse): boolean {
+export function requireAdmin(req: ApiRequest, res: ApiResponse): boolean {
   const payload = verifyToken(bearer(req))
   if (!payload || payload.kind !== 'admin') {
     res.status(401).json({ message: 'Требуются права администратора. Войдите заново.' })

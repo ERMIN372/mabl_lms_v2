@@ -1,4 +1,4 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node'
+import type { ApiRequest, ApiResponse } from './_http.js'
 import { getSql } from './_db.js'
 import { initDatabase } from './_seed.js'
 
@@ -12,7 +12,7 @@ import { initDatabase } from './_seed.js'
  * админки (POST /api/admin/db/init); этот файл нужен для первого запуска по
  * секрету, когда админского аккаунта ещё нет.
  */
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }

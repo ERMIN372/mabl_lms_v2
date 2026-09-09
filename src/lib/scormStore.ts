@@ -1,33 +1,26 @@
 /**
- * Загрузка SCORM-пакетов в серверное хранилище (Vercel Blob).
+ * Загрузка SCORM-пакетов в серверное хранилище (Yandex Object Storage).
  *
- * Раньше пакет распаковывался только в браузере (Cache Storage), поэтому курс
- * работал лишь на том компьютере, с которого его загрузили. Теперь файлы
- * распаковываются в браузере и грузятся напрямую в Vercel Blob (прямая загрузка
- * обходит лимит тела запроса Vercel в 4.5 МБ), а метаданные пакета сохраняются
- * в общей БД. Благодаря этому пакет доступен со всех устройств.
+ * Пакет распаковывается в браузере, а файлы уходят по одному POST'ом на наш
+ * API — сервер кладёт их в бакет под ключами `scorm/<id>/<путь>`. Метаданные
+ * пакета сохраняются в общей БД, поэтому пакет доступен со всех устройств.
  *
- * Файлы лежат в Blob под путями scorm/<id>/<путь>, но отдаются приложением через
- * СВОЙ домен по /scorm-store/<id>/<путь> (прокси в api/router.ts). Same-origin
+ * Отдаются файлы через СВОЙ домен по /scorm-store/<id>/<путь>. Same-origin
  * важен: контент SCORM ищет window.API, поднимаясь по родительским фреймам, а
  * это работает только в пределах одного источника.
+ *
+ * Раньше файлы грузились напрямую в Vercel Blob — так обходился лимит тела
+ * запроса serverless-функции в 4,5 МБ. На своём сервере этого лимита нет.
  */
 
-import { upload, uploadPresigned } from '@vercel/blob/client'
-import { http, getToken } from '@/api/config'
+import { http } from '@/api/config'
+import { putToStorage, storagePreflight } from '@/lib/storageClient'
 
 const BASE = '/scorm-store'
 
-/**
- * Порог, выше которого файл грузится в Blob частями (multipart). Так снимается
- * зависимость от лимита на размер одиночного запроса — крупные ассеты в пакете
- * (видео, PNG на несколько МБ) больше не приводят к ошибке 413.
- */
-const MULTIPART_THRESHOLD = 4 * 1024 * 1024
-
-/** Каноничный адрес файла в хранилище и его размер (для выбора способа раздачи). */
+/** Адрес файла в хранилище и его размер (для диагностики пакета). */
 export interface ScormFileRef {
-  /** URL файла в Blob. */
+  /** Адрес файла на нашем домене. */
   u: string
   /** Размер в байтах. */
   s: number
@@ -42,12 +35,11 @@ export interface ScormPackage {
   launch: string
   fileCount: number
   uploadedAt: string
-  /** Origin хранилища Blob (для прокси). Проставляется при загрузке. */
+  /** Origin прежнего хранилища Vercel Blob — только у пакетов, залитых до переезда. */
   blobBase?: string
   /**
-   * Карта «путь внутри пакета → адрес и размер файла в Blob». Сохраняется при
-   * загрузке, чтобы раздача брала адреса из БД и НЕ вызывала list() на каждый
-   * запрос (list — «advanced operation» Vercel Blob со строгим лимитом).
+   * Карта «путь внутри пакета → адрес и размер файла». Сохраняется при
+   * загрузке и используется диагностикой пакета в админке.
    */
   files?: Record<string, ScormFileRef>
 }
@@ -137,50 +129,14 @@ async function runPool<T>(
 
 export type UploadProgress = (done: number, total: number) => void
 
-/**
- * SDK @vercel/blob при неудаче запроса пресайнд-URL скрывает тело ответа
- * сервера за фразой «Failed to retrieve the presigned URL». Повторяем запрос
- * напрямую и достаём реальную причину, чтобы показать её администратору.
- */
-async function withServerReason(
-  err: unknown,
-  mode: 'token' | 'presigned' | undefined,
-  pathname: string,
-  clientPayload: string,
-): Promise<Error> {
-  const original = err instanceof Error ? err : new Error('Не удалось загрузить файлы пакета')
-  if (mode !== 'presigned' || !/presigned URL|client token/i.test(original.message)) {
-    return original
-  }
-  try {
-    const resp = await fetch('/api/scorm/blob-upload', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        type: 'blob.generate-presigned-url',
-        payload: { pathname, clientPayload, multipart: false },
-      }),
-    })
-    if (!resp.ok) {
-      const data = (await resp.json().catch(() => null)) as { message?: string } | null
-      if (data?.message) {
-        return new Error(`${original.message}. Причина с сервера: ${data.message}`)
-      }
-    }
-  } catch {
-    /* сеть недоступна — оставляем исходную ошибку */
-  }
-  return original
-}
-
 export const scormStore = {
   async list(): Promise<ScormPackage[]> {
     return http<ScormPackage[]>('/scorm')
   },
 
   /**
-   * Распаковать zip в браузере, залить файлы в Vercel Blob и сохранить
-   * метаданные пакета в БД. Возвращает метаданные пакета.
+   * Распаковать zip в браузере, залить файлы в Object Storage через наш API и
+   * сохранить метаданные пакета в БД. Возвращает метаданные пакета.
    *
    * Если пакет с таким же id уже существует, confirmReplace решает, заменить ли
    * его файлы (курсы со ссылкой на пакет продолжат работать с новой версией)
@@ -220,7 +176,7 @@ export const scormStore = {
       throw new Error('В манифесте не найдена точка входа (resource href).')
     }
 
-    // id должен быть уникальным среди уже загруженных пакетов (пути в Blob),
+    // id должен быть уникальным среди уже загруженных пакетов (ключи в бакете),
     // кроме случая осознанной замены существующего пакета его новой версией.
     const existing = new Set((await scormStore.list()).map((p) => p.id))
     let id = slugify(title ?? file.name.replace(/\.zip$/i, ''))
@@ -243,89 +199,23 @@ export const scormStore = {
       return fixed !== rel && !relNames.has(fixed) ? fixed : rel
     }
 
-    // Преflight: заранее выясняем причину возможного отказа, потому что SDK
-    // @vercel/blob при любой ошибке выдачи токена показывает лишь общую фразу
-    // «Failed to retrieve the client token». Заодно сервер сообщает режим
-    // авторизации хранилища: классический RW-токен или OIDC (пресайнд-URL).
-    const pre = await http<{
-      admin: boolean
-      blob: boolean
-      mode?: 'token' | 'presigned'
-      presignError?: string
-      blobEnv?: string[]
-    }>('/scorm/upload-preflight')
-    if (!pre.admin) {
-      throw new Error('Сессия администратора истекла. Выйдите и войдите снова, затем повторите загрузку.')
-    }
-    if (!pre.blob) {
-      const found = pre.blobEnv?.length
-        ? ` В окружении найдены переменные: ${pre.blobEnv.join(', ')}.`
-        : ' В окружении деплоя нет ни одной переменной Blob.'
-      throw new Error(
-        'Серверу недоступно хранилище Vercel Blob: нет ни BLOB_READ_WRITE_TOKEN, ни BLOB_STORE_ID.' +
-          found +
-          ' Как починить: Vercel → Storage → ваш Blob-store → вкладка Projects → Connect Project' +
-          ' (подключение добавит переменные хранилища), затем Redeploy Production.',
-      )
-    }
-    if (pre.mode === 'presigned' && pre.presignError) {
-      const raw = pre.presignError
-      // «Suspended» — это не проблема кода/настроек, а приостановка самого
-      // хранилища на стороне Vercel (обычно превышены лимиты бесплатного плана
-      // Hobby или биллинг). Ни загрузка, ни раздача файлов при этом не работают.
-      if (/suspend/i.test(raw)) {
-        throw new Error(
-          'Хранилище Vercel Blob приостановлено (suspended) на стороне Vercel — ' +
-            'пока оно в этом состоянии, не работают ни загрузка, ни отдача уже загруженных файлов. ' +
-            'Обычно причина — превышены лимиты бесплатного плана Hobby (операции/трафик) или вопрос с биллингом. ' +
-            'Что делать: Vercel → Storage → ваш Blob-store — проверьте статус и использование; ' +
-            'снимите приостановку (upgrade плана до Pro либо дождитесь сброса лимитов в новом цикле).',
-        )
-      }
-      throw new Error(
-        `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${raw}` +
-          ' Обычно это выключенный OIDC у проекта: Vercel → Project Settings → Security →' +
-          ' Secure Backend Access (OIDC) → Enabled, затем Redeploy Production.',
-      )
-    }
+    // Преflight: заранее выясняем причину возможного отказа (истёкшая сессия
+    // администратора или ненастроенное хранилище) — до того, как браузер начнёт
+    // заливать десятки мегабайт.
+    await storagePreflight()
 
-    // Токен сессии администратора кладём в clientPayload — сервер проверяет
-    // права в /api/scorm/blob-upload перед выдачей разрешения на загрузку.
-    const clientPayload = JSON.stringify({ token: getToken() })
-    // При OIDC-подключении store у сервера нет RW-токена, из которого SDK
-    // делает классический клиентский токен, — вместо этого сервер подписывает
-    // пресайнд-URL на каждый файл (uploadPresigned).
-    const putFile = pre.mode === 'presigned' ? uploadPresigned : upload
-
-    let blobBase = ''
     const files: Record<string, ScormFileRef> = {}
-    try {
-      await runPool(
-        entries,
-        6,
-        async (entry) => {
-          const rel = restoreSanitizedExt(entry.name.slice(manifestDir.length))
-          const blob = await entry.async('blob')
-          const result = await putFile(`scorm/${id}/${rel}`, blob, {
-            access: 'public',
-            handleUploadUrl: '/api/scorm/blob-upload',
-            contentType: mimeFor(rel),
-            clientPayload,
-            // Крупные файлы (видео, тяжёлые изображения) грузим частями. Multipart
-            // надёжно обходит любой лимит на размер одиночного запроса и устойчивее
-            // к обрывам сети; мелкие файлы (их большинство) — одним запросом.
-            multipart: blob.size > MULTIPART_THRESHOLD,
-          })
-          if (!blobBase) blobBase = new URL(result.url).origin
-          // Запоминаем каноничный адрес и размер файла — раздача возьмёт их из
-          // метаданных, не вызывая list() (экономим advanced-операции Blob).
-          files[rel] = { u: result.url, s: blob.size }
-        },
-        onProgress,
-      )
-    } catch (err) {
-      throw await withServerReason(err, pre.mode, `scorm/${id}/${launch}`, clientPayload)
-    }
+    await runPool(
+      entries,
+      6,
+      async (entry) => {
+        const rel = restoreSanitizedExt(entry.name.slice(manifestDir.length))
+        const blob = await entry.async('blob')
+        const stored = await putToStorage('scorm', `scorm/${id}/${rel}`, blob, mimeFor(rel))
+        files[rel] = { u: stored.url, s: stored.size }
+      },
+      onProgress,
+    )
 
     const pkg: ScormPackage = {
       id,
@@ -335,7 +225,6 @@ export const scormStore = {
       fileCount: entries.length,
       files,
       uploadedAt: new Date().toISOString(),
-      blobBase,
     }
 
     // Сохраняем метаданные в БД (доступно всем устройствам).

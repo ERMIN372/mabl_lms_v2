@@ -37,6 +37,24 @@ export const authApi = {
     return { user, codeError }
   },
 
+  /**
+   * Проверить сохранённую сессию на сервере и продлить её.
+   *
+   * Профиль лежит в localStorage и переживает токен: без этой сверки человек
+   * видит себя вошедшим, а сервер его уже не узнаёт — оплаченные программы
+   * «закрываются» сами собой. Возвращает false, если сессия мертва.
+   */
+  async session(): Promise<boolean> {
+    if (!getToken()) return false
+    try {
+      const res = await http<{ authenticated: boolean; token?: string }>('/me/session')
+      if (res.token) setToken(res.token)
+      return res.authenticated
+    } catch {
+      return false
+    }
+  },
+
   /** Актуальный профиль с сервера (статус подтверждения почты). */
   async me(): Promise<User> {
     return http<User>('/me')

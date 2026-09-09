@@ -1,0 +1,41 @@
+# systemd-юнит приложения МАБЛ LMS.
+#
+# Установка:
+#   sudo cp deploy/mabl-lms.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mabl-lms
+#
+# Логи:  journalctl -u mabl-lms -f
+
+[Unit]
+Description=MABL LMS (Node.js + PostgreSQL + Object Storage)
+Documentation=https://github.com/HR-analyze/mabl_lms_v2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user-hr
+Group=user-hr
+WorkingDirectory=/srv/mabl-lms
+# Секреты и настройки: строка подключения к БД, ключи хранилища, ЮKassa и т.д.
+EnvironmentFile=/etc/mabl-lms.env
+ExecStart=/usr/bin/node dist-server/server/index.js
+Restart=always
+RestartSec=3
+# Процесс слушает только localhost — наружу его публикует nginx.
+Environment=NODE_ENV=production
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mabl-lms
+
+# Базовое ужесточение прав.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

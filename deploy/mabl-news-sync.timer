@@ -1,0 +1,19 @@
+# Ежедневный запуск синхронизации новостей в 06:00 UTC (09:00 МСК).
+#
+# Установка:
+#   sudo cp deploy/mabl-news-sync.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mabl-news-sync.timer
+#   systemctl list-timers mabl-news-sync.timer
+
+[Unit]
+Description=MABL LMS: ежедневная синхронизация новостей
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+# Если VM была выключена в момент запуска — выполнить сразу после старта.
+Persistent=true
+Unit=mabl-news-sync.service
+
+[Install]
+WantedBy=timers.target

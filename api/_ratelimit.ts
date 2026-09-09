@@ -1,22 +1,20 @@
-import type { VercelRequest } from '@vercel/node'
-import type { NeonQueryFunction } from '@neondatabase/serverless'
+import type { ApiRequest } from './_http.js'
+import type { Sql } from './_db.js'
 
 /**
  * Ограничение частоты запросов.
  *
- * Счётчики лежат в той же базе Neon: она уже подключена, а счётчик получается
- * общим для всех экземпляров функции. Счётчик в памяти процесса такой гарантии
- * не даёт — Vercel поднимает экземпляры параллельно, и у каждого было бы своё
- * окно, то есть реальный лимит умножался бы на их число. Отдельное хранилище
- * (KV/Redis) дало бы то же самое, но ценой ещё одного сервиса и переменных
- * окружения в проде.
+ * Счётчики лежат в той же базе: она уже подключена, а счётчик остаётся общим,
+ * если приложение когда-нибудь поднимут в нескольких экземплярах (у счётчика в
+ * памяти процесса было бы своё окно на каждый, и реальный лимит умножался бы на
+ * их число). Отдельное хранилище (KV/Redis) дало бы то же самое, но ценой ещё
+ * одного сервиса и переменных окружения в проде.
  *
  * Окно фиксированное: одна строка на пару «действие + ключ», по истечении окна
  * счётчик начинается заново. Точности скользящего окна здесь не нужно —
  * задача в том, чтобы перебор стоил дорого, а не в идеальном учёте.
  */
 
-type Sql = NeonQueryFunction<false, false>
 
 export interface RateLimitVerdict {
   /** Можно ли выполнять действие. */
@@ -108,16 +106,16 @@ export async function resetRateLimit(sql: Sql, scope: string, key: string): Prom
  * очередь — ПРАВЫЙ элемент X-Forwarded-For: слева в цепочке стоит то, что
  * прислал клиент, справа — то, что дописал ближайший к нам прокси.
  */
-export function clientIp(req: VercelRequest): string {
+export function clientIp(req: ApiRequest): string {
   const pick = (name: string): string => {
     const raw = req.headers[name]
     const value = Array.isArray(raw) ? raw[0] : raw
     return typeof value === 'string' ? value.trim() : ''
   }
 
-  const vercelIp = pick('x-vercel-forwarded-for')
-  if (vercelIp) return vercelIp.split(',').pop()?.trim() ?? ''
-
+  // Заголовку x-vercel-forwarded-for здесь верить нельзя: его проставляла
+  // платформа, а на своём сервере его подделает любой клиент и обойдёт лимит.
+  // Доверенные заголовки ставит наш nginx (X-Real-IP, X-Forwarded-For).
   const realIp = pick('x-real-ip')
   if (realIp) return realIp
 

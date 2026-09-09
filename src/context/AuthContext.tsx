@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { User } from '@/types'
-import { api, ApiError } from '@/api'
+import { api } from '@/api'
 
 /**
  * Сессия пользователя. Учётные данные проверяет слой данных (`api.auth`),
@@ -83,6 +83,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (user) localStorage.setItem(STORAGE_KEY, JSON.stringify(user))
     else localStorage.removeItem(STORAGE_KEY)
   }, [user])
+
+  // Сверка восстановленного профиля с сервером — один раз при загрузке.
+  // Пока она не завершится, PurchaseContext не запрашивает доступ к программам
+  // (флаг restoring), поэтому снимать флаг обязательно в любом исходе.
+  useEffect(() => {
+    if (!restoring) return
+    let active = true
+    void api.auth
+      .session()
+      .then((alive) => {
+        if (!active) return
+        if (!alive) {
+          setUser(null)
+          setSessionExpired(true)
+        }
+      })
+      .finally(() => {
+        if (active) setRestoring(false)
+      })
+    return () => {
+      active = false
+    }
+    // Достаточно одной проверки на запуск приложения.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Сессия, начатая до появления cookie, живёт только в localStorage. Раздача
   // материалов SCORM читает именно cookie, поэтому подтверждаем сессию серверу
