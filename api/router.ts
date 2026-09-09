@@ -57,6 +57,7 @@ import {
   getObject,
   isStorageConfigured,
   keyFromUrl,
+  storageMode,
   listKeys,
   publicUrlFor,
   putObject,
@@ -2207,7 +2208,7 @@ async function diagnoseScormPackage(id: string) {
   const started = Date.now()
   const report = {
     id,
-    mode: isStorageConfigured() ? 'object-storage' : 'none',
+    mode: storageMode(),
     fileCount: 0,
     okCount: 0,
     failed: [] as Array<{ path: string; sizeKb: number; via: string; status: number | string }>,
@@ -2322,7 +2323,7 @@ async function serveScormFile(id: string, rel: string, req: ApiRequest, res: Api
   if (!isStorageConfigured()) {
     return scormErrorPage(
       res,
-      'Файловое хранилище не настроено. Администратору: задайте переменные S3_BUCKET, S3_ACCESS_KEY_ID и S3_SECRET_ACCESS_KEY и перезапустите сервис.',
+      'Файловое хранилище не настроено. Администратору: задайте STORAGE_DIR (диск сервера) либо переменные S3_* (Object Storage) и перезапустите сервис.',
     )
   }
 
@@ -2381,7 +2382,8 @@ async function storageUpload(prefix: string, req: ApiRequest, res: ApiResponse) 
     if (!isStorageConfigured()) {
       return res.status(503).json({
         message:
-          'Файловое хранилище не настроено: задайте S3_BUCKET, S3_ACCESS_KEY_ID и S3_SECRET_ACCESS_KEY в окружении сервиса и перезапустите его.',
+          'Файловое хранилище не настроено: задайте STORAGE_DIR (диск сервера) либо S3_BUCKET, ' +
+          'S3_ACCESS_KEY_ID и S3_SECRET_ACCESS_KEY (Object Storage) в окружении сервиса и перезапустите его.',
       })
     }
 
@@ -2429,6 +2431,8 @@ async function uploadPreflight(req: ApiRequest) {
     blob: storage,
     storage,
     mode: storage ? ('server' as const) : undefined,
+    // Куда именно ложатся файлы: диск сервера или Object Storage.
+    storageMode: storageMode(),
     maxUploadMb: MAX_UPLOAD_MB,
     // Имена (без значений) переменных хранилища — чтобы отличить «не настроено»
     // от «ключ задан под другим именем».

@@ -26,6 +26,8 @@ export interface StoragePreflight {
   /** Совместимость с прежним ответом сервера (Vercel Blob). */
   blob?: boolean
   mode?: 'server'
+  /** Где лежат файлы: на диске сервера или в Object Storage. */
+  storageMode?: 'local' | 'object-storage' | 'none'
   maxUploadMb?: number
   storageEnv?: string[]
 }
@@ -53,11 +55,11 @@ export async function storagePreflight(): Promise<StoragePreflight> {
       ? ` В окружении сервиса найдены переменные: ${pre.storageEnv.join(', ')}.`
       : ' В окружении сервиса нет ни одной переменной хранилища.'
     throw new Error(
-      'Серверу недоступно файловое хранилище Object Storage.' +
+      'Серверу недоступно файловое хранилище.' +
         found +
-        ' Как починить: задайте S3_BUCKET, S3_ACCESS_KEY_ID и S3_SECRET_ACCESS_KEY' +
-        ' в /etc/mabl-lms.env на сервере и перезапустите сервис' +
-        ' (sudo systemctl restart mabl-lms).',
+        ' Как починить: задайте в /etc/mabl-lms.env либо STORAGE_DIR (файлы на диске' +
+        ' сервера), либо S3_BUCKET с ключами доступа (Object Storage), затем' +
+        ' перезапустите сервис: sudo systemctl restart mabl-lms.',
     )
   }
   return pre
