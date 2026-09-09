@@ -145,7 +145,7 @@ export interface Material {
   date: string
   courseId?: string
   body?: string[]
-  /** Адрес прикреплённого файла в хранилище (Vercel Blob). */
+  /** Адрес прикреплённого файла в хранилище: `/files/<ключ>`. */
   fileUrl?: string
   /** Тот же файл с принудительной отдачей на скачивание. */
   fileDownloadUrl?: string

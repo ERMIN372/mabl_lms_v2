@@ -1,12 +1,12 @@
 import bcrypt from 'bcryptjs'
-import type { NeonQueryFunction } from '@neondatabase/serverless'
+import type { Sql } from './_db.js'
 
 /**
  * Совместно используемая логика инициализации БД (схема + стартовый админ).
  * Вызывается из api/setup.ts (по секрету) и из админ-панели (POST /api/admin/db/init).
  */
 
-type Sql = NeonQueryFunction<false, false>
+
 
 /**
  * Стартовый аккаунт администратора. Создаётся только если такого e-mail в базе

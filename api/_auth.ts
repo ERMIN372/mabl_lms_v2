@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import type { VercelRequest, VercelResponse } from '@vercel/node'
+import type { ApiRequest, ApiResponse } from './_http.js'
 
 /**
  * Простая аутентификация по подписанному токену (HMAC-SHA256), без внешних
@@ -58,7 +58,7 @@ export function verifyToken(token: string | undefined): TokenPayload | null {
 }
 
 /** Достать Bearer-токен из заголовка Authorization. */
-export function bearer(req: VercelRequest): string | undefined {
+export function bearer(req: ApiRequest): string | undefined {
   const h = req.headers['authorization'] || req.headers['Authorization']
   const value = Array.isArray(h) ? h[0] : h
   if (typeof value === 'string' && value.startsWith('Bearer ')) return value.slice(7)
@@ -69,7 +69,7 @@ export function bearer(req: VercelRequest): string | undefined {
  * Гард администратора: пропускает только запросы с валидным токеном роли admin.
  * При отказе сам отвечает 401 и возвращает false.
  */
-export function requireAdmin(req: VercelRequest, res: VercelResponse): boolean {
+export function requireAdmin(req: ApiRequest, res: ApiResponse): boolean {
   const payload = verifyToken(bearer(req))
   if (!payload || payload.kind !== 'admin') {
     res.status(401).json({ message: 'Требуются права администратора. Войдите заново.' })

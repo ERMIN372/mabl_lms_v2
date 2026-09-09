@@ -1,17 +1,13 @@
 /**
- * Загрузка одиночных файлов в серверное хранилище (Vercel Blob).
+ * Загрузка одиночных файлов в серверное хранилище (Yandex Object Storage).
  *
- * Файл идёт из браузера прямо в хранилище — так же, как файлы SCORM-пакетов
- * (см. src/lib/scormStore.ts). Прямая загрузка обходит лимит тела запроса
- * Vercel в 4.5 МБ, поэтому презентацию или PDF на десятки мегабайт можно
- * приложить к материалу без прокси через serverless-функцию.
+ * Файл уходит POST'ом на наш API, сервер кладёт его в бакет и возвращает адрес
+ * на нашем домене (`/files/<ключ>`). Раньше здесь был SDK Vercel Blob с прямой
+ * загрузкой в обход лимита тела запроса в 4,5 МБ — на своём сервере этот лимит
+ * отсутствует, потолок задают nginx (client_max_body_size) и MAX_UPLOAD_MB.
  */
 
-import { upload, uploadPresigned } from '@vercel/blob/client'
-import { http, getToken } from '@/api/config'
-
-/** Порог, выше которого файл грузится частями (устойчивее к обрывам сети). */
-const MULTIPART_THRESHOLD = 4 * 1024 * 1024
+import { putToStorage, storagePreflight } from '@/lib/storageClient'
 
 export interface StoredFile {
   /** Каноничный адрес файла в хранилище. */
@@ -22,14 +18,6 @@ export interface StoredFile {
   name: string
   /** Размер в байтах. */
   size: number
-}
-
-interface Preflight {
-  admin: boolean
-  blob: boolean
-  mode?: 'token' | 'presigned'
-  presignError?: string
-  blobEnv?: string[]
 }
 
 /** Безопасное имя объекта в хранилище: без пробелов и служебных символов. */
@@ -54,65 +42,31 @@ export function formatFileSize(bytes: number): string {
 }
 
 /**
- * Проверить готовность хранилища и объяснить отказ понятным текстом: SDK
- * @vercel/blob прячет любую причину за общей фразой про токен.
- */
-async function preflight(): Promise<Preflight> {
-  const pre = await http<Preflight>('/storage/upload-preflight')
-  if (!pre.admin) {
-    throw new Error(
-      'Сессия администратора истекла. Выйдите и войдите снова, затем повторите загрузку.',
-    )
-  }
-  if (!pre.blob) {
-    const found = pre.blobEnv?.length
-      ? ` В окружении найдены переменные: ${pre.blobEnv.join(', ')}.`
-      : ' В окружении деплоя нет ни одной переменной Blob.'
-    throw new Error(
-      'Серверу недоступно хранилище Vercel Blob: нет ни BLOB_READ_WRITE_TOKEN, ни BLOB_STORE_ID.' +
-        found +
-        ' Как починить: Vercel → Storage → ваш Blob-store → вкладка Projects → Connect Project,' +
-        ' затем Redeploy Production.',
-    )
-  }
-  if (pre.mode === 'presigned' && pre.presignError) {
-    if (/suspend/i.test(pre.presignError)) {
-      throw new Error(
-        'Хранилище Vercel Blob приостановлено (suspended) на стороне Vercel — пока оно в этом ' +
-          'состоянии, не работают ни загрузка, ни отдача уже загруженных файлов. Проверьте ' +
-          'статус и лимиты: Vercel → Storage → ваш Blob-store.',
-      )
-    }
-    throw new Error(
-      `Сервер не смог авторизоваться в Vercel Blob по OIDC: ${pre.presignError}` +
-        ' Обычно это выключенный OIDC у проекта: Vercel → Project Settings → Security →' +
-        ' Secure Backend Access (OIDC) → Enabled, затем Redeploy Production.',
-    )
-  }
-  return pre
-}
-
-/**
  * Залить файл в хранилище под префиксом раздела (`materials/`) и вернуть его
- * адреса. Права администратора проверяет сервер по токену из clientPayload.
+ * адреса. Права администратора проверяет сервер по токену сессии.
  */
 export async function uploadFile(prefix: string, file: File): Promise<StoredFile> {
-  const pre = await preflight()
-  // При OIDC-подключении store у сервера нет RW-токена, из которого SDK делает
-  // клиентский токен, — вместо этого сервер подписывает пресайнд-URL.
-  const putFile = pre.mode === 'presigned' ? uploadPresigned : upload
+  const pre = await storagePreflight()
 
-  const result = await putFile(`${prefix}${safeName(file.name)}`, file, {
-    access: 'public',
-    handleUploadUrl: `/api/${prefix}blob-upload`,
-    contentType: file.type || 'application/octet-stream',
-    clientPayload: JSON.stringify({ token: getToken() }),
-    multipart: file.size > MULTIPART_THRESHOLD,
-  })
+  const limitMb = pre.maxUploadMb ?? 256
+  if (file.size > limitMb * 1024 * 1024) {
+    throw new Error(
+      `Файл ${formatFileSize(file.size)} больше допустимых ${limitMb} МБ. ` +
+        'Увеличьте MAX_UPLOAD_MB в /etc/mabl-lms.env и client_max_body_size в nginx.',
+    )
+  }
+
+  const stored = await putToStorage(
+    'materials',
+    `${prefix}${safeName(file.name)}`,
+    file,
+    file.type || 'application/octet-stream',
+  )
 
   return {
-    url: result.url,
-    downloadUrl: result.downloadUrl ?? result.url,
+    url: stored.url,
+    // Тот же файл, но с заголовком Content-Disposition: attachment.
+    downloadUrl: `${stored.url}?download=${encodeURIComponent(file.name)}`,
     name: file.name,
     size: file.size,
   }

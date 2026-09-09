@@ -6,3 +6,6 @@ dist-ssr
 .DS_Store
 *.log
 .vite
+
+# Сборка сервера
+dist-server

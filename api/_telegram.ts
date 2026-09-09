@@ -1,5 +1,5 @@
-import type { NeonQueryFunction } from '@neondatabase/serverless'
-import type { NewsItem } from '../src/types'
+import type { Sql } from './_db.js'
+import type { NewsItem } from '../src/types/index.js'
 import { ensureSchema } from './_seed.js'
 
 /**
@@ -14,7 +14,7 @@ import { ensureSchema } from './_seed.js'
  * Файлы с префиксом `_` Vercel не считает HTTP-маршрутами.
  */
 
-type Sql = NeonQueryFunction<false, false>
+
 
 /** Сырой пост, извлечённый из HTML веб-превью канала. */
 interface RawPost {
